@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # Database Container Setup
+  db:
+    image: postgres:15
+    container_name: ecommerce_db
+    restart: always # Agar crash hua toh automatically restart ho jayega
+    ports:
+      - "5432:5432" # Host mapping
+    environment:
+      # POSTGRES variables tumhare .env jaise set karne hain
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data # Data delete na ho uske liye volume
+
+  # Backend Application Container Setup
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ecommerce_backend
+    restart: always
+    ports:
+      - "${PORT}:${PORT}"
+    depends_on:
+      - db  # Bataata hai ki pehle 'db' start hona chahiye
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+    command: >
+      sh -c "npx prisma migrate deploy && npx prisma db seed && node dist/main.js"
+
+# Database volume ko declare karna zaroori hai
+volumes:
+  pgdata:

@@ -1,0 +1,151 @@
+model Category {
+  id           String    @id @default(uuid())
+  parentId     String?
+  name         String
+  slug         String    @unique
+  description  String?
+  imageUrl     String?
+  iconUrl      String?
+  displayOrder Int       @default(0)
+  isActive     Boolean   @default(true)
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  parent   Category?  @relation("CatHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CatHierarchy")
+  products Product[]
+}
+
+model Tag {
+  id   String @id @default(uuid())
+  name String @unique
+  slug String @unique
+}
+
+model Product {
+  id               String    @id @default(uuid())
+  storeId          String
+  categoryId       String?
+  name             String
+  slug             String
+  description      String?
+  shortDescription String?
+  skuPrefix        String?
+  productType      String // simple, variable
+  status           String    @default("draft") // draft, active, inactive, archived
+  isFeatured       Boolean   @default(false)
+  isDigital        Boolean   @default(false)
+  weight           Decimal?  @db.Decimal(10, 2) // kg
+  length           Decimal?  @db.Decimal(10, 2) // cm
+  width            Decimal?  @db.Decimal(10, 2) // cm
+  height           Decimal?  @db.Decimal(10, 2) // cm
+  seoTitle         String?
+  seoDescription   String?
+  seoKeywords      String[]
+  metadata         Json      @default("{}")
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  store        Store                @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  category     Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  images       ProductImage[]
+  variants     ProductVariant[]
+  readDocument ProductReadDocument?
+}
+
+model ProductImage {
+  id           String   @id @default(uuid())
+  productId    String
+  imageUrl     String
+  altText      String?
+  displayOrder Int      @default(0)
+  isPrimary    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductAttribute {
+  id                 String    @id @default(uuid())
+  name               String    @unique
+  slug               String    @unique
+  type               String // text, number, select, multiselect, boolean
+  isVariantAttribute Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  values       ProductAttributeValue[]
+  variantLinks ProductVariantAttribute[]
+}
+
+model ProductAttributeValue {
+  id           String    @id @default(uuid())
+  attributeId  String
+  value        String
+  displayOrder Int       @default(0)
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  attribute    ProductAttribute          @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variantLinks ProductVariantAttribute[]
+
+  @@unique([attributeId, value])
+}
+
+model ProductVariant {
+  id             String    @id @default(uuid())
+  productId      String
+  sku            String    @unique
+  name           String?
+  price          Decimal   @db.Decimal(10, 2)
+  compareAtPrice Decimal?  @db.Decimal(10, 2)
+  costPrice      Decimal?  @db.Decimal(10, 2)
+  barcode        String?
+  weight         Decimal?  @db.Decimal(10, 2)
+  length         Decimal?  @db.Decimal(10, 2)
+  width          Decimal?  @db.Decimal(10, 2)
+  height         Decimal?  @db.Decimal(10, 2)
+  imageUrl       String?
+  status         String    @default("active")
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  product     Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributes  ProductVariantAttribute[]
+  inventories Inventory[]
+  movements   InventoryMovement[]
+}
+
+model ProductVariantAttribute {
+  variantId        String
+  attributeId      String
+  attributeValueId String
+  createdAt        DateTime @default(now())
+
+  variant        ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attribute      ProductAttribute      @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  attributeValue ProductAttributeValue @relation(fields: [attributeValueId], references: [id], onDelete: Cascade)
+
+  @@id([variantId, attributeId])
+}
+
+model ProductReadDocument {
+  id          String   @id @default(uuid())
+  productId   String   @unique
+  slug        String   @unique
+  isPublished Boolean  @default(false)
+  document    Json // Flattened read-model for fast queries
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+}

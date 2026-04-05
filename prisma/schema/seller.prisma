@@ -1,0 +1,39 @@
+model Seller {
+  id                 String    @id @default(uuid())
+  userId             String    @unique
+  businessName       String
+  businessType       String? // individual, partnership, llc, corporation
+  taxId              String?
+  verificationStatus String    @default("pending")
+  verificationDocs   Json      @default("[]")
+  commissionRate     Decimal   @default(0.00) @db.Decimal(5, 2)
+  metadata           Json      @default("{}")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stores         Store[]
+  payoutAccounts SellerPayoutAccount[]
+}
+
+model SellerPayoutAccount {
+  id                String    @id @default(uuid())
+  sellerId          String
+  accountType       String // bank, upi, wallet
+  accountHolderName String
+  accountNumber     String? // Encrypted in production
+  ifscCode          String?
+  bankName          String?
+  upiId             String?
+  walletProvider    String?
+  isPrimary         Boolean   @default(false)
+  isVerified        Boolean   @default(false)
+  verificationData  Json      @default("{}")
+  metadata          Json      @default("{}")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+}

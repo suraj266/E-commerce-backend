@@ -1,0 +1,22 @@
+model Coupon {
+  id                    String    @id @default(uuid())
+  storeId               String? // null means platform-wide
+  code                  String    @unique
+  name                  String
+  description           String?
+  discountType          String // percentage, fixed_amount
+  discountValue         Decimal   @db.Decimal(10, 2)
+  minimumPurchaseAmount Decimal?  @db.Decimal(10, 2)
+  maximumDiscountAmount Decimal?  @db.Decimal(10, 2)
+  usageLimit            Int? // Total limit
+  usageLimitPerUser     Int? // Limit per user
+  validFrom             DateTime
+  validUntil            DateTime
+  isActive              Boolean   @default(true)
+  metadata              Json      @default("{}")
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  deletedAt             DateTime?
+
+  store Store? @relation(fields: [storeId], references: [id], onDelete: Cascade)
+}

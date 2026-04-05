@@ -1,0 +1,45 @@
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  isDefault   Boolean? @default(false)
+  createdById String?
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user       User[]
+  permission RolePermission[]
+  createdBy  User?            @relation("roleCreatedBy", fields: [createdById], references: [id])
+  updatedBy  User?            @relation("roleUpdatedBy", fields: [updatedById], references: [id])
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  module      String
+  action      String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  roles RolePermission[]
+
+  @@unique([module, action])
+}
+
+model RolePermission {
+  id           String   @id @default(uuid())
+  roleId       String
+  permissionId String
+  assignedById String?
+  revokedById  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignedBy User?      @relation("rolePermissionAssignedBy", fields: [assignedById], references: [id])
+  revokedBy  User?      @relation("rolePermissionRevokedBy", fields: [revokedById], references: [id])
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([roleId, permissionId])
+}
