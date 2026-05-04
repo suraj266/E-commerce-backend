@@ -1,0 +1,68 @@
+enum AttributeType {
+  SELECT      // pick one from allowed values (e.g. Color: Red)
+  MULTISELECT // pick multiple (e.g. Tags as attributes)
+  BOOLEAN     // yes/no (e.g. HasBluetooth)
+  TEXT        // freeform text — schema-supported, UI hides in v1
+  NUMBER      // numeric — schema-supported, UI hides in v1
+}
+
+/// Global attribute registry. Used for:
+///   - variant differentiation (Phase B): Color/Size produces variants
+///   - faceted filters on listing pages (Sprint 5)
+///
+/// Sellers don't create attributes — admin curates the closed taxonomy.
+/// Sellers pick attribute values from the allowed list when listing
+/// products (Phase B).
+model ProductAttribute {
+  id                 String        @id @default(uuid())
+  name               String        @unique
+  slug               String        @unique
+  description        String?
+  type               AttributeType @default(SELECT)
+  isVariantAttribute Boolean       @default(false)
+  metadata           Json          @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  values       ProductAttributeValue[]
+  variantLinks ProductVariantAttribute[]
+}
+
+/// Allowed values for SELECT/MULTISELECT attributes. Admin curates.
+/// `slug` enables URL routing on filtered listings (?color=forest-green).
+/// BOOLEAN attributes don't use this table.
+model ProductAttributeValue {
+  id           String  @id @default(uuid())
+  attributeId  String
+  value        String
+  slug         String
+  displayOrder Int     @default(0)
+  metadata     Json    @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  attribute    ProductAttribute          @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  variantLinks ProductVariantAttribute[]
+
+  @@unique([attributeId, value])
+  @@unique([attributeId, slug])
+}
+
+/// Junction binding a product variant to a specific attribute value.
+/// Used in Phase B variants — for now this table is empty.
+model ProductVariantAttribute {
+  variantId        String
+  attributeId      String
+  attributeValueId String
+  createdAt        DateTime @default(now())
+
+  variant        ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  attribute      ProductAttribute      @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  attributeValue ProductAttributeValue @relation(fields: [attributeValueId], references: [id], onDelete: Cascade)
+
+  @@id([variantId, attributeId])
+}

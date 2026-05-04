@@ -1,0 +1,25 @@
+/// Singleton appearance settings for the Admin Panel UI.
+/// Always exactly one row, id = 'global'. Drives the CSS variables injected
+/// by the frontend (admin) layout server-side. Light + dark values stored
+/// side-by-side as raw OKLCH strings ("oklch(L C H)" or with alpha).
+model AdminThemeSetting {
+  id String @id // always 'global' — singleton
+
+  primaryLight     String
+  primaryDark      String
+  accentLight      String
+  accentDark       String
+  sidebarLight     String
+  sidebarDark      String
+  destructiveLight String
+  destructiveDark  String
+
+  /// CSS length, e.g. "0.625rem".
+  radius String
+
+  /// 'inter' | 'jetbrains' | 'system' | null.
+  fontFamily String?
+
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}

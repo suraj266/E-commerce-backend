@@ -1,0 +1,19 @@
+/// Tax catalog — admin-managed list of tax types (GST 5%, GST 18%, VAT 12%, etc.)
+/// Sellers pick ONE tax per product via the product form's radio group.
+///
+/// Single `rate` field is intentional: Indian GST is a flat percentage. The
+/// IGST-vs-CGST+SGST split is a calculation concern that runs at order time
+/// (rate ÷ 2 split for intra-state) — it doesn't belong on the catalog row.
+model Tax {
+  id           String    @id @default(uuid())
+  name         String    @unique
+  rate         Decimal   @db.Decimal(5, 2)
+  description  String?
+  isActive     Boolean   @default(true)
+  displayOrder Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  products Product[]
+}

@@ -29,6 +29,10 @@ services:
       - .env
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+    volumes:
+      # Local image provider writes master + variant-cache files here.
+      # Persisted across container restarts; ignored when IMAGE_PROVIDER=s3.
+      - uploads_dev:/app/uploads
     
     develop:
       watch:
@@ -44,6 +48,7 @@ services:
     command: >
       sh -c "npx prisma generate && npx prisma migrate deploy && npm run start:dev"
 
-# Database volume
+# Persistent volumes
 volumes:
   pgdata_dev:
+  uploads_dev:

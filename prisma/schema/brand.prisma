@@ -1,0 +1,30 @@
+enum BrandStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// Central brand registry. Multi-seller marketplaces need this to keep
+/// "Apple", "apple", and "APPLE" as one canonical entry — used for facets,
+/// brand pages, and brand-specific deals. Created by admins; sellers pick
+/// from the list when listing products. Sellers can request a new brand
+/// (future: requestBrand mutation) but cannot create brands directly.
+model Brand {
+  id          String      @id @default(uuid())
+  name        String      @unique
+  slug        String      @unique
+  description String?
+  logoUrl     String?
+  bannerUrl   String?
+  websiteUrl  String?
+  countryCode String?
+  foundedYear Int?
+  status      BrandStatus @default(ACTIVE)
+  isFeatured  Boolean     @default(false)
+  metadata    Json        @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  products Product[]
+}

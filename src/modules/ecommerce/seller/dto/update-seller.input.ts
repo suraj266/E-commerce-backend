@@ -1,8 +1,15 @@
+import { InputType, Field, ID, PartialType } from '@nestjs/graphql';
+import { IsUUID } from 'class-validator';
 import { CreateSellerInput } from './create-seller.input';
-import { InputType, Field, Int, PartialType } from '@nestjs/graphql';
 
+/**
+ * Allows partial update of any seller field. Used by:
+ *  - the seller themselves while in DRAFT (self-edit)
+ *  - admin while sellers are in REJECTED state (correcting and re-reviewing)
+ */
 @InputType()
 export class UpdateSellerInput extends PartialType(CreateSellerInput) {
-  @Field(() => Int)
-  id: number;
+  @Field(() => ID)
+  @IsUUID()
+  id: string;
 }

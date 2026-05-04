@@ -1,0 +1,48 @@
+enum ImageOwnerType {
+  STORE
+  SELLER
+  PRODUCT
+  CATEGORY
+  USER
+  GENERIC
+}
+
+enum ImagePurpose {
+  LOGO
+  BANNER
+  AVATAR
+  ICON
+  PRODUCT_PRIMARY
+  PRODUCT_GALLERY
+  GENERIC
+}
+
+/// Provider-agnostic image record. Bytes live with whichever provider was
+/// active at upload time (local fs / S3 / Cloudinary). The `provider` and
+/// `externalId` fields tell us who owns the bytes; `url` is the canonical
+/// URL clients render. Variant URLs are NOT stored — they're derived at
+/// runtime by appending size/format query params.
+model Image {
+  id         String @id @default(uuid())
+  provider   String
+  externalId String @unique
+  url        String
+  format     String
+  width      Int
+  height     Int
+  sizeBytes  Int
+
+  ownerType ImageOwnerType @default(GENERIC)
+  ownerId   String?
+  purpose   ImagePurpose   @default(GENERIC)
+  alt       String?
+
+  uploadedById String?
+  metadata     Json      @default("{}")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  @@index([ownerType, ownerId])
+  @@index([uploadedById])
+}

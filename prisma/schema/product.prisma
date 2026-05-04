@@ -18,42 +18,67 @@ model Category {
   products Product[]
 }
 
-model Tag {
-  id   String @id @default(uuid())
-  name String @unique
-  slug String @unique
+// Tag model lives in tag.prisma (separate file). Will gain a M:N junction
+// with Product when the Product module is rebuilt in Sprint 2.4d.
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum ProductType {
+  SIMPLE
+  VARIABLE
 }
 
 model Product {
-  id               String    @id @default(uuid())
+  id               String        @id @default(uuid())
   storeId          String
   categoryId       String?
+  brandId          String?
+  taxId            String?
   name             String
-  slug             String
+  slug             String        @unique
   description      String?
   shortDescription String?
   skuPrefix        String?
-  productType      String // simple, variable
-  status           String    @default("draft") // draft, active, inactive, archived
-  isFeatured       Boolean   @default(false)
-  isDigital        Boolean   @default(false)
-  weight           Decimal?  @db.Decimal(10, 2) // kg
-  length           Decimal?  @db.Decimal(10, 2) // cm
-  width            Decimal?  @db.Decimal(10, 2) // cm
-  height           Decimal?  @db.Decimal(10, 2) // cm
+  productType      ProductType   @default(SIMPLE)
+  status           ProductStatus @default(DRAFT)
+  isFeatured       Boolean       @default(false)
+  isDigital        Boolean       @default(false)
+  weight           Decimal?      @db.Decimal(10, 2) // kg
+  length           Decimal?      @db.Decimal(10, 2) // cm
+  width            Decimal?      @db.Decimal(10, 2) // cm
+  height           Decimal?      @db.Decimal(10, 2) // cm
+  /// Indian GST classification — 4/6/8 digit Harmonized System of Nomenclature
+  /// code. Required for tax-invoice issuance. Validated as digits-only at
+  /// the DTO layer; stored as string to preserve leading zeros.
+  hsnCode          String?
   seoTitle         String?
   seoDescription   String?
   seoKeywords      String[]
-  metadata         Json      @default("{}")
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  /// Per-product PDP specs — array of groups, each with items.
+  /// Shape: [{ name: string, order: int, items: [{ label, value, order }] }]
+  specifications   Json          @default("[]")
+  metadata         Json          @default("{}")
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
   deletedAt        DateTime?
 
   store        Store                @relation(fields: [storeId], references: [id], onDelete: Cascade)
   category     Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brand        Brand?               @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  tax          Tax?                 @relation(fields: [taxId], references: [id], onDelete: SetNull)
   images       ProductImage[]
   variants     ProductVariant[]
   readDocument ProductReadDocument?
+  tags         Tag[]                @relation("ProductTags")
+
+  @@index([storeId, status])
+  @@index([brandId])
+  @@index([categoryId])
 }
 
 model ProductImage {
@@ -69,51 +94,32 @@ model ProductImage {
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
-model ProductAttribute {
-  id                 String    @id @default(uuid())
-  name               String    @unique
-  slug               String    @unique
-  type               String // text, number, select, multiselect, boolean
-  isVariantAttribute Boolean   @default(false)
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-  deletedAt          DateTime?
+// ProductAttribute, ProductAttributeValue, and ProductVariantAttribute
+// have been moved to attribute.prisma (separate file with full schema +
+// AttributeType enum + value slug). They're still in the same Prisma
+// generator since prismaSchemaFolder feature merges all files.
 
-  values       ProductAttributeValue[]
-  variantLinks ProductVariantAttribute[]
-}
-
-model ProductAttributeValue {
-  id           String    @id @default(uuid())
-  attributeId  String
-  value        String
-  displayOrder Int       @default(0)
-  metadata     Json      @default("{}")
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  deletedAt    DateTime?
-
-  attribute    ProductAttribute          @relation(fields: [attributeId], references: [id], onDelete: Cascade)
-  variantLinks ProductVariantAttribute[]
-
-  @@unique([attributeId, value])
+enum VariantStatus {
+  ACTIVE
+  INACTIVE
+  OUT_OF_STOCK
 }
 
 model ProductVariant {
-  id             String    @id @default(uuid())
+  id             String        @id @default(uuid())
   productId      String
-  sku            String    @unique
+  sku            String        @unique
   name           String?
-  price          Decimal   @db.Decimal(10, 2)
-  compareAtPrice Decimal?  @db.Decimal(10, 2)
-  costPrice      Decimal?  @db.Decimal(10, 2)
+  price          Decimal       @db.Decimal(10, 2)
+  compareAtPrice Decimal?      @db.Decimal(10, 2)
+  costPrice      Decimal?      @db.Decimal(10, 2)
   barcode        String?
-  weight         Decimal?  @db.Decimal(10, 2)
-  length         Decimal?  @db.Decimal(10, 2)
-  width          Decimal?  @db.Decimal(10, 2)
-  height         Decimal?  @db.Decimal(10, 2)
+  weight         Decimal?      @db.Decimal(10, 2)
+  length         Decimal?      @db.Decimal(10, 2)
+  width          Decimal?      @db.Decimal(10, 2)
+  height         Decimal?      @db.Decimal(10, 2)
   imageUrl       String?
-  status         String    @default("active")
+  status         VariantStatus @default(ACTIVE)
   metadata       Json      @default("{}")
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
@@ -125,18 +131,8 @@ model ProductVariant {
   movements   InventoryMovement[]
 }
 
-model ProductVariantAttribute {
-  variantId        String
-  attributeId      String
-  attributeValueId String
-  createdAt        DateTime @default(now())
-
-  variant        ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Cascade)
-  attribute      ProductAttribute      @relation(fields: [attributeId], references: [id], onDelete: Cascade)
-  attributeValue ProductAttributeValue @relation(fields: [attributeValueId], references: [id], onDelete: Cascade)
-
-  @@id([variantId, attributeId])
-}
+// ProductVariantAttribute moved to attribute.prisma alongside the rest of
+// the attribute models.
 
 model ProductReadDocument {
   id          String   @id @default(uuid())

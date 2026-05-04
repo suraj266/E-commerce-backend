@@ -1,24 +1,34 @@
+enum StoreStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  UNDER_REVIEW
+}
+
 model Store {
-  id             String    @id @default(uuid())
+  id             String      @id @default(uuid())
   sellerId       String
   name           String
-  slug           String    @unique
+  slug           String      @unique
   description    String?
   logoUrl        String?
   bannerUrl      String?
-  customDomain   String?   @unique
-  subdomain      String?   @unique
-  currencyCode   String    @default("USD")
-  timezone       String    @default("UTC")
-  locale         String    @default("en-US")
-  themeConfig    Json      @default("{}")
-  taxConfig      Json      @default("{}")
-  shippingConfig Json      @default("{}")
-  status         String    @default("active") // active, inactive, suspended, under_review
-  isFeatured     Boolean   @default(false)
-  metadata       Json      @default("{}")
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  customDomain   String?     @unique
+  subdomain      String?     @unique
+  currencyCode   String      @default("INR")
+  timezone       String      @default("Asia/Kolkata")
+  locale         String      @default("en-IN")
+  supportEmail   String?
+  supportPhone   String?
+  themeConfig    Json        @default("{}")
+  taxConfig      Json        @default("{}")
+  shippingConfig Json        @default("{}")
+  status         StoreStatus @default(DRAFT)
+  isFeatured     Boolean     @default(false)
+  metadata       Json        @default("{}")
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
   deletedAt      DateTime?
 
   seller     Seller         @relation(fields: [sellerId], references: [id], onDelete: Cascade)
@@ -48,7 +58,7 @@ model Warehouse {
   city         String
   state        String
   postalCode   String
-  countryCode  String
+  countryCode  String    @default("IN")
   phone        String?
   isDefault    Boolean   @default(false)
   isActive     Boolean   @default(true)

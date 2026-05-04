@@ -1,0 +1,24 @@
+enum TagStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// Cross-cutting label for products. Unlike Categories (hierarchical, one
+/// per product) Tags are flexible and many-to-many — a single product can
+/// carry multiple tags ("trending", "made-in-india", "diwali-special").
+/// Admin-managed registry; sellers will pick from this list in 2.4d.
+model Tag {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  status      TagStatus @default(ACTIVE)
+  isFeatured  Boolean   @default(false)
+  metadata    Json      @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  products Product[] @relation("ProductTags")
+}

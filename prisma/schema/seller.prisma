@@ -1,16 +1,61 @@
+enum BusinessType {
+  INDIVIDUAL
+  PROPRIETORSHIP
+  PARTNERSHIP
+  LLP
+  PRIVATE_LIMITED
+  PUBLIC_LIMITED
+  HUF
+}
+
+enum SellerStatus {
+  DRAFT
+  PENDING
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
 model Seller {
-  id                 String    @id @default(uuid())
-  userId             String    @unique
-  businessName       String
-  businessType       String? // individual, partnership, llc, corporation
-  taxId              String?
-  verificationStatus String    @default("pending")
-  verificationDocs   Json      @default("[]")
-  commissionRate     Decimal   @default(0.00) @db.Decimal(5, 2)
-  metadata           Json      @default("{}")
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-  deletedAt          DateTime?
+  id     String @id @default(uuid())
+  userId String @unique
+
+  // Business identity
+  legalName            String
+  displayName          String
+  businessType         BusinessType
+  dateOfIncorporation  DateTime?
+  registrationNumber   String? // CIN / LLPIN / Partnership reg
+
+  // Tax (separate, validated)
+  panNumber String  @unique // India PAN — 10 chars
+  gstin     String? @unique // 15-char GSTIN, optional until go-live
+
+  // Contact
+  businessEmail String  @unique
+  businessPhone String  @unique
+  supportEmail  String?
+
+  // Authorized signatory (entities only — nullable for individual / proprietorship)
+  signatoryName        String?
+  signatoryPan         String?
+  signatoryDesignation String?
+
+  // Granular verification — admin sets each section independently
+  overallStatus       SellerStatus @default(DRAFT)
+  panVerifiedAt       DateTime?
+  gstinVerifiedAt     DateTime?
+  bankVerifiedAt      DateTime?
+  documentsVerifiedAt DateTime?
+  rejectionReason     String?
+
+  commissionRate Decimal @default(0.00) @db.Decimal(5, 2)
+  metadata       Json    @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
   user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   stores         Store[]
@@ -18,7 +63,7 @@ model Seller {
 }
 
 model SellerPayoutAccount {
-  id                String    @id @default(uuid())
+  id                String  @id @default(uuid())
   sellerId          String
   accountType       String // bank, upi, wallet
   accountHolderName String
@@ -27,13 +72,14 @@ model SellerPayoutAccount {
   bankName          String?
   upiId             String?
   walletProvider    String?
-  isPrimary         Boolean   @default(false)
-  isVerified        Boolean   @default(false)
-  verificationData  Json      @default("{}")
-  metadata          Json      @default("{}")
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
-  deletedAt         DateTime?
+  isPrimary         Boolean @default(false)
+  isVerified        Boolean @default(false)
+  verificationData  Json    @default("{}")
+  metadata          Json    @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
   seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
 }

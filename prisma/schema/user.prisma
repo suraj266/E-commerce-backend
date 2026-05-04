@@ -18,18 +18,32 @@ model User {
   createdAt DateTime @default(now())
   roleId    String?
 
-  role          Role?            @relation(fields: [roleId], references: [id])
-  createdRoles  Role[]           @relation("roleCreatedBy")
-  updatedRoles  Role[]           @relation("roleUpdatedBy")
-  assignedRoles RolePermission[] @relation("rolePermissionAssignedBy")
-  revokedRoles  RolePermission[] @relation("rolePermissionRevokedBy")
-  refreshTokens RefreshToken[]
+  role                     Role?                    @relation(fields: [roleId], references: [id])
+  createdRoles             Role[]                   @relation("roleCreatedBy")
+  updatedRoles             Role[]                   @relation("roleUpdatedBy")
+  assignedRoles            RolePermission[]         @relation("rolePermissionAssignedBy")
+  revokedRoles             RolePermission[]         @relation("rolePermissionRevokedBy")
+  refreshTokens            RefreshToken[]
+  emailVerificationTokens  EmailVerificationToken[]
 
   // Identity & Auth extensions
   addresses UserAddress[]
   apiKeys   ApiKey[]
   sessions  Session[]
   Seller    Seller?
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model UserAddress {

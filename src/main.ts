@@ -12,7 +12,10 @@ import { ResponseInterceptor } from './common/interceptors/response.intercepter'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
-  app.use(helmet());
+  app.use(helmet({
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: false,
+  }));
   app.use(compression());
   app.use(cookieParser());
   app.useGlobalInterceptors(new ResponseInterceptor());
