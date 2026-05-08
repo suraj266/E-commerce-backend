@@ -1,8 +1,8 @@
-import { Resolver, Query, Mutation, Args, ID } from '@nestjs/graphql';
+import { Resolver, Query, Mutation, Args, ID, Int, Float } from '@nestjs/graphql';
 import { UseGuards } from '@nestjs/common';
 import { ProductStatus } from '@prisma/client';
 import { ProductService } from './product.service';
-import { Product } from './entities/product.entity';
+import { Product, PaginatedProducts } from './entities/product.entity';
 import { ProductImage } from './entities/product-image.entity';
 import { CreateProductInput } from './dto/create-product.input';
 import { UpdateProductInput } from './dto/update-product.input';
@@ -198,6 +198,37 @@ export class ProductResolver {
       categorySlug,
       sort,
       limit,
+    });
+  }
+
+  /**
+   * Paginated catalog with price-range filter — backs /shop. Like
+   * `publicProducts` but returns totals for the pager.
+   */
+  @Query(() => PaginatedProducts, { name: 'paginatedPublicProducts' })
+  paginatedPublicProducts(
+    @Args('storeSlug', { type: () => String, nullable: true }) storeSlug?: string,
+    @Args('brandSlug', { type: () => String, nullable: true }) brandSlug?: string,
+    @Args('tagSlug', { type: () => String, nullable: true }) tagSlug?: string,
+    @Args('categorySlug', { type: () => String, nullable: true })
+    categorySlug?: string,
+    @Args('minPrice', { type: () => Float, nullable: true }) minPrice?: number,
+    @Args('maxPrice', { type: () => Float, nullable: true }) maxPrice?: number,
+    @Args('sort', { type: () => ProductSortOrder, nullable: true })
+    sort?: ProductSortOrder,
+    @Args('page', { type: () => Int, nullable: true }) page?: number,
+    @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+  ) {
+    return this.productService.findPaginatedPublicProducts({
+      storeSlug,
+      brandSlug,
+      tagSlug,
+      categorySlug,
+      minPrice,
+      maxPrice,
+      sort,
+      page,
+      pageSize,
     });
   }
 

@@ -179,6 +179,26 @@ export class CategoryService {
     return category;
   }
 
+  /**
+   * Public lookup by slug — backs `/category/[slug]` storefront page.
+   * Returns the category PLUS its immediate active children so the
+   * landing page can render sub-category chips without a second round
+   * trip. 404s if the category doesn't exist or is inactive/deleted.
+   */
+  async findBySlugPublic(slug: string) {
+    const category = await this.prisma.category.findUnique({
+      where: { slug },
+    });
+    if (!category || category.deletedAt || !category.isActive) {
+      throw new NotFoundException(`Category "${slug}" not found`);
+    }
+    const children = await this.prisma.category.findMany({
+      where: { parentId: category.id, deletedAt: null, isActive: true },
+      orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+    });
+    return { ...category, children };
+  }
+
   async update(id: string, updateCategoryInput: UpdateCategoryInput) {
     const { id: _, ...updateData } = updateCategoryInput;
 

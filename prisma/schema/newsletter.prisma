@@ -1,0 +1,24 @@
+/// Newsletter subscriptions — captured by the public newsletter signup
+/// block on the storefront. Stored in its own table (not user-bound) so
+/// non-customers can subscribe without registering an account.
+///
+/// `source` records where the address came from (e.g. "homepage-newsletter")
+/// so the admin can correlate signups to specific blocks/pages.
+
+enum NewsletterStatus {
+  ACTIVE
+  UNSUBSCRIBED
+}
+
+model NewsletterSubscription {
+  id              String           @id @default(uuid())
+  email           String           @unique
+  source          String?
+  status          NewsletterStatus @default(ACTIVE)
+  /// Set when the subscriber clicks an unsubscribe link.
+  unsubscribedAt  DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([status, createdAt])
+}

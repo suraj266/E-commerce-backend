@@ -1,0 +1,44 @@
+/// Customer — 1:1 profile extension for users with role=customer.
+///
+/// Mirrors the `Seller` pattern: auth + identity stay on `User`, role-specific
+/// data lives here. Today this table holds modest customer-only fields
+/// (marketing opt-in, currency preference, free-form metadata). It exists
+/// primarily so:
+///
+///   1. Future customer-only tables (Cart, Wishlist, Order, etc.) can FK
+///      to `Customer.id` instead of `User.id`. That makes a future split
+///      of customers into a fully standalone identity surface a 30-line
+///      migration instead of touching every relation.
+///
+///   2. Customer-specific data has a structured home. Avoids polluting
+///      `User.metadata` JSON with prefs that we want indexable.
+///
+/// See `database docs/CUSTOMER_SEPARATION_PLAYBOOK.md` for the migration
+/// path if/when full separation becomes warranted (scale, security
+/// boundary, regulatory).
+
+model Customer {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  /// Whether the customer opted in to marketing communications. Default
+  /// false — must be an explicit opt-in for GDPR/CAN-SPAM compliance.
+  marketingOptIn    Boolean @default(false)
+
+  /// ISO 4217 code. Defaults to INR for the India-first launch; we'll
+  /// show prices in this currency when multi-currency lands.
+  preferredCurrency String  @default("INR")
+
+  /// Free-form extension. Use sparingly — promote to columns once a field
+  /// graduates from "nice to have" to "we query it".
+  metadata Json @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wishlists Wishlist[]
+  cart      Cart?
+  orders    Order[]
+}

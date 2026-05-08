@@ -1,0 +1,36 @@
+/// CMS Page — admin-composable pages built from typed blocks.
+/// Each `Page` is a slug-addressed page on the public storefront. The
+/// `blocks` JSON column holds an ordered list of `{ id, type, props,
+/// visible }` entries. Frontend looks up each block.type in a component
+/// registry and renders accordingly.
+///
+/// System pages (home, about, terms, privacy, help) are seeded at boot and
+/// can be edited by admins but not deleted.
+
+enum PageStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model Page {
+  id          String     @id @default(uuid())
+  slug        String     @unique
+  title       String
+  metaTitle   String?
+  metaDesc    String?
+  status      PageStatus @default(DRAFT)
+  /// Ordered list of blocks. Shape:
+  /// [{ id: string, type: string, props: object, visible: boolean }]
+  blocks      Json       @default("[]")
+  /// True for seeded pages (home, about, etc.) — admin can edit but UI
+  /// hides the delete button.
+  isSystem    Boolean    @default(false)
+  publishedAt DateTime?
+  createdById String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  deletedAt   DateTime?
+
+  @@index([status])
+}

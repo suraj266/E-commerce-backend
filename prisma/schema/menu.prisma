@@ -1,0 +1,32 @@
+/// Menu — admin-managed navigation surfaces (header / footer).
+///
+/// One Menu row per location (enforced by @unique on `location`). The
+/// `items` JSON column stores a tree of `{ id, label, url, target?, icon?,
+/// visible, children[] }`. Frontend's site-header and site-footer
+/// components consume the tree and render per location.
+///
+/// Seeded at boot — re-running the seeder won't duplicate or destroy
+/// admin edits. See `prisma/seed/menus.seed.ts`.
+
+enum MenuLocation {
+  HEADER_PRIMARY     // Main top nav
+  HEADER_TOP         // Optional thin strip above (Help, Track Order)
+  FOOTER_SHOP        // Footer column 1
+  FOOTER_HELP        // Footer column 2
+  FOOTER_COMPANY     // Footer column 3
+  FOOTER_LEGAL       // Footer column 4
+  FOOTER_SOCIAL      // Footer social icons row
+}
+
+model Menu {
+  id        String       @id @default(uuid())
+  name      String
+  location  MenuLocation @unique
+  isActive  Boolean      @default(true)
+  /// Ordered tree of MenuItem.
+  /// Shape: [{ id, label, url, target?, icon?, visible, children: [...] }]
+  items     Json         @default("[]")
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  deletedAt DateTime?
+}

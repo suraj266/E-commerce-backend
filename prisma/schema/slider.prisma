@@ -1,0 +1,54 @@
+/// Slider — admin-managed reusable carousel content.
+///
+/// Sliders are first-class entities (separate from pages) so the same
+/// carousel can appear on multiple pages — edit once, update everywhere.
+/// Page builder blocks reference a slider via its stable `key` field.
+///
+/// Each slide carries 3 image fields (desktop / tablet / mobile) for
+/// proper responsive rendering. Fallback chain: mobile → tablet → desktop.
+
+enum SliderStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+model Slider {
+  id          String       @id @default(uuid())
+  name        String                       // "Home hero slider"
+  key         String       @unique         // "home-hero" — used in block refs
+  description String?
+  status      SliderStatus @default(DRAFT)
+  /// Free-form config (style: default/full-width/boxed, autoplay interval,
+  /// transition style, etc.). Future-proof for variant-specific settings
+  /// without requiring schema migrations.
+  config      Json         @default("{}")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deletedAt   DateTime?
+
+  items SlideItem[]
+}
+
+model SlideItem {
+  id             String    @id @default(uuid())
+  sliderId       String
+  title          String?
+  description    String?
+  link           String?
+  ctaLabel       String?
+  imageUrl       String?
+  tabletImageUrl String?
+  mobileImageUrl String?
+  order          Int       @default(0)
+  isEnabled      Boolean   @default(true)
+  /// Per-slide extras (text alignment, overlay opacity, brand color...)
+  metadata       Json      @default("{}")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  slider Slider @relation(fields: [sliderId], references: [id], onDelete: Cascade)
+
+  @@index([sliderId, order])
+}

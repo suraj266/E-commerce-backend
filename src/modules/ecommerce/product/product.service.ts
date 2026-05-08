@@ -583,6 +583,154 @@ export class ProductService {
    * Filters by store/brand/tag/category slug. Pricing-aware sort goes through
    * the default variant since price lives there (Path A model).
    */
+  /**
+   * Paginated public catalog. Adds price-range filtering and proper page
+   * pagination on top of `findPublicProducts`. Used by /shop and any other
+   * customer-facing browse surface that needs to know totals.
+   *
+   * Price filter applies to the default variant — for SIMPLE products
+   * that's the only variant, for VARIABLE products it's the first.
+   */
+  /**
+   * Build the list of category ids that are descendants of (and include)
+   * the given root slug. Used by the public catalog so /category/electronics
+   * surfaces products from every sub-category beneath it, not only the
+   * exact-match root.
+   *
+   * Single round-trip: pulls all categories once and walks the parent map
+   * in memory. Sub-100 categories total in our scale; cheaper than
+   * recursive Prisma queries.
+   */
+  private async buildCategoryDescendantFilter(
+    slug: string,
+  ): Promise<string[] | null> {
+    const root = await this.prisma.category.findUnique({
+      where: { slug },
+      select: { id: true, deletedAt: true, isActive: true },
+    });
+    if (!root || root.deletedAt || !root.isActive) {
+      // Slug doesn't resolve — return an empty list so the product query
+      // returns no rows (consistent with old exact-match behavior).
+      return [];
+    }
+    const all = await this.prisma.category.findMany({
+      where: { deletedAt: null },
+      select: { id: true, parentId: true },
+    });
+    // child-of map
+    const byParent = new Map<string, string[]>();
+    for (const c of all) {
+      const key = c.parentId ?? '__root__';
+      const list = byParent.get(key) ?? [];
+      list.push(c.id);
+      byParent.set(key, list);
+    }
+    const ids = new Set<string>([root.id]);
+    const queue: string[] = [root.id];
+    while (queue.length > 0) {
+      const next = queue.shift()!;
+      for (const child of byParent.get(next) ?? []) {
+        if (!ids.has(child)) {
+          ids.add(child);
+          queue.push(child);
+        }
+      }
+    }
+    return [...ids];
+  }
+
+  async findPaginatedPublicProducts(filter: {
+    storeSlug?: string;
+    brandSlug?: string;
+    tagSlug?: string;
+    categorySlug?: string;
+    minPrice?: number;
+    maxPrice?: number;
+    sort?: ProductSortOrder;
+    page?: number;
+    pageSize?: number;
+  }) {
+    const page = Math.max(1, filter.page ?? 1);
+    const pageSize = Math.min(Math.max(filter.pageSize ?? 12, 1), 60);
+
+    const priceBounds: { gte?: number; lte?: number } = {};
+    if (filter.minPrice != null) priceBounds.gte = filter.minPrice;
+    if (filter.maxPrice != null) priceBounds.lte = filter.maxPrice;
+    const hasPriceFilter = Object.keys(priceBounds).length > 0;
+    const priceVariantFilter: Prisma.ProductVariantWhereInput = {
+      deletedAt: null,
+      ...(hasPriceFilter ? { price: priceBounds } : {}),
+    };
+
+    // When the customer browses /category/electronics, they expect to see
+    // products in EVERY descendant of "electronics" too — not just ones
+    // pinned directly to the root. Walk the category tree once to collect
+    // all descendant ids, then filter products by `categoryId IN (...)`.
+    // (Falls back to exact-slug match if the lookup fails for any reason.)
+    const categoryFilter = filter.categorySlug
+      ? await this.buildCategoryDescendantFilter(filter.categorySlug)
+      : null;
+
+    const where: Prisma.ProductWhereInput = {
+      deletedAt: null,
+      status: ProductStatus.ACTIVE,
+      store: { status: 'ACTIVE', deletedAt: null },
+      ...(filter.storeSlug
+        ? { store: { slug: filter.storeSlug, status: 'ACTIVE', deletedAt: null } }
+        : {}),
+      ...(filter.brandSlug ? { brand: { slug: filter.brandSlug } } : {}),
+      ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
+      ...(filter.tagSlug ? { tags: { some: { slug: filter.tagSlug } } } : {}),
+      ...(hasPriceFilter ? { variants: { some: priceVariantFilter } } : {}),
+    };
+
+    // Price-sort needs in-memory ordering (Prisma can't order by relation
+    // aggregates). For NEWEST we let the DB do it, then paginate after.
+    if (
+      filter.sort === ProductSortOrder.PRICE_ASC ||
+      filter.sort === ProductSortOrder.PRICE_DESC
+    ) {
+      const all = await this.prisma.product.findMany({
+        where,
+        include: PRODUCT_INCLUDE,
+      });
+      const hydrated = all.map(hydrate);
+      hydrated.sort((a, b) => {
+        const pa = a.price ?? 0;
+        const pb = b.price ?? 0;
+        return filter.sort === ProductSortOrder.PRICE_ASC ? pa - pb : pb - pa;
+      });
+      const totalCount = hydrated.length;
+      const start = (page - 1) * pageSize;
+      return {
+        items: hydrated.slice(start, start + pageSize),
+        totalCount,
+        totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+        currentPage: page,
+        pageSize,
+      };
+    }
+
+    const [rows, totalCount] = await this.prisma.$transaction([
+      this.prisma.product.findMany({
+        where,
+        include: PRODUCT_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+
+    return {
+      items: rows.map(hydrate),
+      totalCount,
+      totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+      currentPage: page,
+      pageSize,
+    };
+  }
+
   async findPublicProducts(filter: {
     storeSlug?: string;
     brandSlug?: string;

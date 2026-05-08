@@ -71,6 +71,32 @@ const permissions = [
     { module: "tax", action: "create", description: "Create tax" },
     { module: "tax", action: "update", description: "Update tax" },
     { module: "tax", action: "delete", description: "Delete tax" },
+    // Page (CMS) Management
+    { module: "page", action: "read", description: "Read CMS pages" },
+    { module: "page", action: "create", description: "Create CMS page" },
+    { module: "page", action: "update", description: "Update CMS page (incl. publish)" },
+    { module: "page", action: "delete", description: "Delete CMS page" },
+    // Menu (CMS) Management
+    { module: "menu", action: "read", description: "Read navigation menus" },
+    { module: "menu", action: "create", description: "Create navigation menu" },
+    { module: "menu", action: "update", description: "Update navigation menu (incl. items tree)" },
+    { module: "menu", action: "delete", description: "Delete navigation menu" },
+    // Slider (CMS) Management
+    { module: "slider", action: "read", description: "Read sliders + slide items" },
+    { module: "slider", action: "create", description: "Create sliders" },
+    { module: "slider", action: "update", description: "Update sliders + slide items (incl. reorder)" },
+    { module: "slider", action: "delete", description: "Delete sliders" },
+    // Newsletter (CMS) Management
+    { module: "newsletter", action: "read", description: "Read newsletter subscribers list" },
+    { module: "newsletter", action: "update", description: "Update newsletter subscriber (e.g. mark unsubscribed)" },
+    // Customer Management
+    { module: "customer", action: "read", description: "Read customers list and detail" },
+    { module: "customer", action: "update", description: "Update customer profile / status / preferences" },
+    { module: "customer", action: "delete", description: "Soft-delete or restore a customer" },
+    // Payment Gateway Management
+    { module: "payment", action: "read", description: "Read payment gateway configs and transactions" },
+    { module: "payment", action: "create", description: "Create payment gateway config" },
+    { module: "payment", action: "update", description: "Update payment gateway config / toggle / set default" },
 ]
 
 async function main() {
@@ -93,6 +119,20 @@ async function main() {
         create: {
             name: "seller",
             description: "Marketplace seller — self-managed profile, products, orders, payouts.",
+            isDefault: false
+        }
+    })
+
+    // Customer role — assigned automatically on /auth/customer/register.
+    // No platform permissions; customer-facing endpoints (cart, wishlist,
+    // orders) are gated by JwtAuthGuard + ownership checks against the
+    // user's Customer.id. See CUSTOMER_SEPARATION_PLAYBOOK.md.
+    await prisma.role.upsert({
+        where: { name: "customer" },
+        update: {},
+        create: {
+            name: "customer",
+            description: "Storefront shopper — owns cart, wishlist, addresses, orders.",
             isDefault: false
         }
     })

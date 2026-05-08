@@ -11,6 +11,11 @@ import { StringValue } from 'ms';
 import { LoginUserDto } from './dto/login-user.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterSellerDto } from './dto/register-seller.dto';
+import { RegisterCustomerDto } from './dto/register-customer.dto';
+import {
+  RequestPasswordResetDto,
+  ResetPasswordDto,
+} from './dto/password-reset.dto';
 import {
   AdminVerifyEmailDto,
   ResendVerificationDto,
@@ -23,6 +28,10 @@ import { JwtService } from '@nestjs/jwt';
 import { config } from '@/common/config/config';
 
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h — short window
+                                                    // because anyone with
+                                                    // the token can take
+                                                    // over the account.
 
 @Injectable()
 export class AuthService {
@@ -83,6 +92,64 @@ export class AuthService {
       // Dev convenience — exposes the token. Remove or gate by NODE_ENV in prod.
       verificationToken: token,
       verificationUrl: `${config.FRONTEND_URL ?? ''}/seller/verify-email?token=${token}`,
+    };
+  }
+
+  // ========================
+  // CUSTOMER REGISTRATION
+  // ========================
+  /**
+   * Register a new user with the `customer` role. Same shape as the seller
+   * flow (User row + EmailVerificationToken) PLUS a 1:1 Customer profile
+   * extension row that holds storefront-specific prefs (currency, marketing
+   * opt-in, etc.). Future cart/wishlist/order tables FK to `Customer.id`,
+   * which keeps a future split of customers into a standalone identity
+   * surface cheap. See CUSTOMER_SEPARATION_PLAYBOOK.md.
+   *
+   * Phone is intentionally not collected here — customers add it during
+   * checkout via the address form.
+   */
+  async registerCustomer(input: RegisterCustomerDto) {
+    const normalizedEmail = input.email.toLowerCase();
+
+    const customerRole = await this.prisma.role.findUnique({
+      where: { name: 'customer' },
+    });
+    if (!customerRole) {
+      throw new BadRequestException(
+        'Customer role missing. Run prisma seed.',
+      );
+    }
+
+    const emailExists = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+    if (emailExists) throw new ConflictException('Email already registered');
+
+    const passwordHash = await hash(input.password);
+
+    // Atomic: create User + Customer extension together. Either both or
+    // neither — never an orphan customer row.
+    const user = await this.prisma.user.create({
+      data: {
+        name: input.name,
+        email: normalizedEmail,
+        password: passwordHash,
+        roleId: customerRole.id,
+        status: 'active',
+        Customer: { create: {} },
+      },
+      include: { Customer: true },
+    });
+
+    const token = await this.issueEmailVerificationToken(user.id);
+
+    return {
+      message: 'Registration successful. Please verify your email.',
+      userId: user.id,
+      // Dev convenience — exposes the token. Gate by NODE_ENV in prod.
+      verificationToken: token,
+      verificationUrl: `${config.FRONTEND_URL ?? ''}/verify-email?token=${token}`,
     };
   }
 
@@ -178,6 +245,23 @@ export class AuthService {
     const isMatch = await verify(user.password, loginUserInput.password)
     if (!isMatch) {
       throw new UnauthorizedException("Invalid password")
+    }
+
+    // Account-type gate. The customer storefront, seller portal, and admin
+    // panel each post their own `accountType` so users can't sign in with
+    // the wrong kind of account from the wrong form. Mismatch returns the
+    // same generic message a wrong password would, so attackers can't tell
+    // whether they got the role or the password wrong.
+    if (loginUserInput.accountType) {
+      const roleName = user.role?.name ?? '';
+      const allowed: Record<string, string[]> = {
+        customer: ['customer'],
+        seller: ['seller'],
+        admin: ['admin', 'superAdmin'],
+      };
+      if (!allowed[loginUserInput.accountType]?.includes(roleName)) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
     }
 
     // Block unverified emails for non-admin roles. Admin role is pre-verified
@@ -315,6 +399,89 @@ export class AuthService {
     }
 
     throw new UnauthorizedException('Invalid refresh token');
+  }
+
+  // ========================
+  // PASSWORD RESET
+  // ========================
+
+  /**
+   * Forgot-password — generic OK response so callers can't enumerate
+   * valid emails. If the email exists, we issue a single-use token
+   * (valid 1h) and invalidate any older unused tokens for that user.
+   *
+   * Returns the token + dev URL so the frontend can show a click-through
+   * link until SMTP is wired. In production, gate these fields behind
+   * NODE_ENV the same way `verificationToken` is.
+   */
+  async requestPasswordReset(input: RequestPasswordResetDto) {
+    const email = input.email.toLowerCase();
+    const user = await this.prisma.user.findUnique({ where: { email } });
+
+    // Always succeed externally — never leak account existence.
+    if (!user) {
+      return { message: 'If the email exists, a reset link was sent.' };
+    }
+
+    // Invalidate older unused tokens before issuing a fresh one — keeps
+    // the attack surface small if the user reset multiple times.
+    await this.prisma.passwordResetToken.updateMany({
+      where: { userId: user.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+
+    const token = randomBytes(32).toString('hex');
+    await this.prisma.passwordResetToken.create({
+      data: {
+        userId: user.id,
+        token,
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS),
+      },
+    });
+
+    return {
+      message: 'If the email exists, a reset link was sent.',
+      // Dev convenience — strip these in prod (gate by NODE_ENV).
+      resetToken: token,
+      resetUrl: `${config.FRONTEND_URL ?? ''}/reset-password?token=${token}`,
+    };
+  }
+
+  /**
+   * Apply the new password. Validates token freshness + single-use, then
+   * argon2-hashes the new password and writes it. Also invalidates the
+   * token by stamping `usedAt` so the same link can't be replayed.
+   */
+  async resetPassword(input: ResetPasswordDto) {
+    const record = await this.prisma.passwordResetToken.findUnique({
+      where: { token: input.token },
+    });
+    if (!record) throw new NotFoundException('Invalid reset link');
+    if (record.usedAt) {
+      throw new BadRequestException('This reset link has already been used');
+    }
+    if (record.expiresAt < new Date()) {
+      throw new BadRequestException('Reset link expired. Request a new one.');
+    }
+
+    const passwordHash = await hash(input.password);
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: record.userId },
+        data: { password: passwordHash },
+      }),
+      this.prisma.passwordResetToken.update({
+        where: { id: record.id },
+        data: { usedAt: new Date() },
+      }),
+      // Invalidate any active refresh tokens — force every device to
+      // re-login with the new password. Keeps stolen sessions short.
+      this.prisma.refreshToken.deleteMany({
+        where: { userId: record.userId },
+      }),
+    ]);
+
+    return { message: 'Password updated. You can now sign in.' };
   }
 
   // ========================

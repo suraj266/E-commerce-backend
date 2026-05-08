@@ -2,6 +2,11 @@ import { Body, Controller, Get, HttpCode, Post, Req, Res, UnauthorizedException,
 import { AuthService } from "./auth.service";
 import { LoginUserDto } from "./dto/login-user.dto";
 import { RegisterSellerDto } from "./dto/register-seller.dto";
+import { RegisterCustomerDto } from "./dto/register-customer.dto";
+import {
+    RequestPasswordResetDto,
+    ResetPasswordDto,
+} from "./dto/password-reset.dto";
 import {
     AdminVerifyEmailDto,
     ResendVerificationDto,
@@ -26,6 +31,12 @@ export class AuthController {
         return this.authService.registerSeller(input);
     }
 
+    @Post('customer/register')
+    @HttpCode(201)
+    async registerCustomer(@Body() input: RegisterCustomerDto) {
+        return this.authService.registerCustomer(input);
+    }
+
     @Post('verify-email')
     @HttpCode(200)
     async verifyEmail(@Body() input: VerifyEmailDto) {
@@ -36,6 +47,22 @@ export class AuthController {
     @HttpCode(200)
     async resendVerification(@Body() input: ResendVerificationDto) {
         return this.authService.resendVerification(input);
+    }
+
+    // -------------------------------------------------------------------------
+    // PASSWORD RESET (forgot-password)
+    // -------------------------------------------------------------------------
+
+    @Post('request-password-reset')
+    @HttpCode(200)
+    async requestPasswordReset(@Body() input: RequestPasswordResetDto) {
+        return this.authService.requestPasswordReset(input);
+    }
+
+    @Post('reset-password')
+    @HttpCode(200)
+    async resetPassword(@Body() input: ResetPasswordDto) {
+        return this.authService.resetPassword(input);
     }
 
     /** Admin-only: manually mark a user's email as verified. */

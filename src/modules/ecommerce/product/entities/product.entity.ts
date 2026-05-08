@@ -2,6 +2,7 @@ import {
   ObjectType,
   Field,
   ID,
+  Int,
   Float,
   registerEnumType,
 } from '@nestjs/graphql';
@@ -146,4 +147,22 @@ export class Product {
 
   @Field(() => [ProductVariant], { nullable: true, description: 'Always present; for SIMPLE products contains 1 default variant.' })
   variants?: ProductVariant[];
+}
+
+@ObjectType()
+export class PaginatedProducts {
+  @Field(() => [Product])
+  items: Product[];
+
+  @Field(() => Int)
+  totalCount: number;
+
+  @Field(() => Int)
+  totalPages: number;
+
+  @Field(() => Int)
+  currentPage: number;
+
+  @Field(() => Int)
+  pageSize: number;
 }

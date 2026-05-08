@@ -70,11 +70,14 @@ model Product {
   store        Store                @relation(fields: [storeId], references: [id], onDelete: Cascade)
   category     Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   brand        Brand?               @relation(fields: [brandId], references: [id], onDelete: SetNull)
-  tax          Tax?                 @relation(fields: [taxId], references: [id], onDelete: SetNull)
-  images       ProductImage[]
-  variants     ProductVariant[]
-  readDocument ProductReadDocument?
-  tags         Tag[]                @relation("ProductTags")
+  tax           Tax?                 @relation(fields: [taxId], references: [id], onDelete: SetNull)
+  images        ProductImage[]
+  variants      ProductVariant[]
+  readDocument  ProductReadDocument?
+  tags          Tag[]                @relation("ProductTags")
+  wishlistItems WishlistItem[]
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
 
   @@index([storeId, status])
   @@index([brandId])
@@ -125,10 +128,13 @@ model ProductVariant {
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
-  product     Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
-  attributes  ProductVariantAttribute[]
-  inventories Inventory[]
-  movements   InventoryMovement[]
+  product       Product                   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attributes    ProductVariantAttribute[]
+  inventories   Inventory[]
+  movements     InventoryMovement[]
+  wishlistItems WishlistItem[]
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
 }
 
 // ProductVariantAttribute moved to attribute.prisma alongside the rest of

@@ -45,5 +45,13 @@ export class Category {
    */
   @Field(() => Boolean, { nullable: true })
   hasChildren?: boolean | null;
+
+  /**
+   * Populated only by `publicCategoryBySlug` — immediate active children
+   * for rendering sub-category chips on the category landing page.
+   * Other queries leave it undefined.
+   */
+  @Field(() => [Category], { nullable: true })
+  children?: Category[] | null;
 }
 

@@ -24,7 +24,13 @@
     "seed:categories": "ts-node src/prisma/seed/categories.seed.ts",
     "seed:categories:prod": "node dist/prisma/seed/categories.seed.js",
     "seed:taxes": "ts-node src/prisma/seed/taxes.seed.ts",
-    "seed:taxes:prod": "node dist/prisma/seed/taxes.seed.js"
+    "seed:taxes:prod": "node dist/prisma/seed/taxes.seed.js",
+    "seed:pages": "ts-node src/prisma/seed/pages.seed.ts",
+    "seed:pages:prod": "node dist/prisma/seed/pages.seed.js",
+    "seed:menus": "ts-node src/prisma/seed/menus.seed.ts",
+    "seed:menus:prod": "node dist/prisma/seed/menus.seed.js",
+    "seed:sliders": "ts-node src/prisma/seed/sliders.seed.ts",
+    "seed:sliders:prod": "node dist/prisma/seed/sliders.seed.js"
   },
   "prisma": {
     "seed": "node dist/prisma/seed/rolePermission.seed.js",
@@ -63,6 +69,7 @@
     "passport-jwt": "^4.0.1",
     "pg": "^8.16.3",
     "pino-http": "^11.0.0",
+    "razorpay": "^2.9.6",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "sharp": "^0.34.5"

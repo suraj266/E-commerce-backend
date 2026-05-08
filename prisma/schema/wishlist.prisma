@@ -1,0 +1,50 @@
+/// Wishlist — customer's saved products list.
+///
+/// Each Customer gets ONE default wishlist auto-created on first
+/// `addToWishlist` call. The schema supports multiple named wishlists
+/// (isDefault flag, name field) so that "Holiday picks" / "Birthday"
+/// lists can land later without a migration.
+///
+/// `customerId` is FK'd to `Customer.id`, NOT `User.id`. This is the
+/// load-bearing decision from CUSTOMER_SEPARATION_PLAYBOOK.md — when we
+/// later split customers into a standalone identity surface, this FK
+/// doesn't need to change.
+
+model Wishlist {
+  id         String  @id @default(uuid())
+  customerId String
+  name       String  @default("My Wishlist")
+  isPublic   Boolean @default(false)
+  isDefault  Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  customer Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items    WishlistItem[]
+
+  @@index([customerId])
+}
+
+model WishlistItem {
+  id         String  @id @default(uuid())
+  wishlistId String
+  productId  String
+  /// Optional — set only when the customer wishlisted a specific variant
+  /// (e.g. "this t-shirt in size M"). NULL = whole product.
+  variantId  String?
+
+  createdAt DateTime @default(now())
+
+  wishlist Wishlist        @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  product  Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant  ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  /// One row per product (or product+variant) per wishlist. The unique
+  /// constraint covers both "no variant" and "specific variant" cases —
+  /// a customer can wishlist size M and L of the same shirt as separate
+  /// rows, but cannot wishlist the same combo twice.
+  @@unique([wishlistId, productId, variantId])
+  @@index([productId])
+}

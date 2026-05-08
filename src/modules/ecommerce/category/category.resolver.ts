@@ -70,6 +70,16 @@ export class CategoryResolver {
     return this.categoryService.findOne(id);
   }
 
+  /**
+   * Storefront lookup by slug — backs `/category/[slug]` landing page.
+   * Returns the category + its immediate active children (for sub-category
+   * chips). Public; only returns active, non-deleted categories.
+   */
+  @Query(() => Category, { name: 'publicCategoryBySlug' })
+  publicCategoryBySlug(@Args('slug', { type: () => String }) slug: string) {
+    return this.categoryService.findBySlugPublic(slug);
+  }
+
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('category:update')
   @Mutation(() => Category)

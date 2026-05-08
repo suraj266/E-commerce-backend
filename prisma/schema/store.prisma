@@ -31,11 +31,13 @@ model Store {
   updatedAt      DateTime    @updatedAt
   deletedAt      DateTime?
 
-  seller     Seller         @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  settings   StoreSetting[]
-  warehouses Warehouse[]
-  products   Product[]
-  coupons    Coupon[]
+  seller       Seller         @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  settings     StoreSetting[]
+  warehouses   Warehouse[]
+  products     Product[]
+  coupons      Coupon[]
+  sellerOrders SellerOrder[]
+  orderItems   OrderItem[]
 }
 
 model StoreSetting {

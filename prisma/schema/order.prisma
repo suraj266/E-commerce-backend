@@ -1,0 +1,225 @@
+/// Order — customer's parent order.
+///
+/// One Order is created per checkout. Items are grouped by seller into
+/// SellerOrders so each seller fulfills their slice independently.
+///
+/// Key design notes:
+///
+/// 1. FK to `Customer.id` (NOT `User.id`) per CUSTOMER_SEPARATION_PLAYBOOK.md.
+///    When customers eventually move to their own identity surface, this
+///    relation doesn't need to change.
+///
+/// 2. Snapshot fields on OrderItem (sku, name, unitPrice, etc.) preserve
+///    the buyer's original purchase context even if the product is later
+///    renamed, repriced, or deleted.
+///
+/// 3. Addresses are FK'd to UserAddress at the time of order placement.
+///    UserAddress rows are kept on hard-delete (soft-delete in app code)
+///    so historical orders don't lose their shipping context.
+///
+/// 4. Payment is COD-only for v1. The payment_status / payment_method
+///    enums leave room for gateway integration (Razorpay, Stripe) later.
+
+enum OrderStatus {
+  PENDING        /// Just placed, awaiting seller confirmation
+  CONFIRMED      /// Seller confirmed they'll fulfill
+  PACKED         /// Items packed, awaiting handover to courier
+  SHIPPED        /// In transit
+  DELIVERED      /// Delivered to customer
+  CANCELLED      /// Cancelled (customer or seller)
+  REFUNDED       /// Refunded after delivery (returns flow)
+}
+
+enum PaymentStatus {
+  PENDING
+  AWAITING_PAYMENT   /// Online payment initiated, waiting for gateway confirmation
+  PAID
+  PARTIALLY_PAID
+  REFUNDED
+  PARTIALLY_REFUNDED
+  FAILED
+}
+
+enum PaymentMethod {
+  COD            /// Cash on delivery — only method live for v1
+  CARD           /// Reserved — gateway integration ships in Sprint 4
+  UPI
+  NET_BANKING
+  WALLET
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+model Order {
+  id          String   @id @default(uuid())
+  /// Human-readable: ORD-YYYY-MM-XXXXXX. Generated at placement time.
+  orderNumber String   @unique
+  customerId  String
+
+  status        OrderStatus   @default(PENDING)
+  paymentStatus PaymentStatus @default(PENDING)
+  paymentMethod PaymentMethod @default(COD)
+
+  /// Snapshot totals — recomputed in the placement transaction and stored
+  /// so the customer sees the same numbers they paid for forever.
+  subtotal       Decimal @db.Decimal(10, 2)
+  taxAmount      Decimal @db.Decimal(10, 2) @default(0)
+  shippingAmount Decimal @db.Decimal(10, 2) @default(0)
+  discountAmount Decimal @db.Decimal(10, 2) @default(0)
+  totalAmount    Decimal @db.Decimal(10, 2)
+  currencyCode   String  @default("INR")
+
+  /// FK to UserAddress (since it covers all users; future split to
+  /// CustomerAddress will migrate this — see playbook step 4).
+  shippingAddressId String?
+  billingAddressId  String?
+
+  customerNotes String?
+  internalNotes String?
+  metadata      Json    @default("{}")
+
+  placedAt    DateTime  @default(now())
+  cancelledAt DateTime?
+  deliveredAt DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  customer        Customer             @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  shippingAddress UserAddress?         @relation("OrderShippingAddress", fields: [shippingAddressId], references: [id])
+  billingAddress  UserAddress?         @relation("OrderBillingAddress", fields: [billingAddressId], references: [id])
+  sellerOrders    SellerOrder[]
+  items           OrderItem[]
+  statusHistory   OrderStatusHistory[]
+  payments        Payment[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([placedAt])
+}
+
+/// SellerOrder — one row per seller per parent Order.
+///
+/// Lets each seller see only their slice of the customer's checkout.
+/// Status transitions happen at this granularity (the parent Order's
+/// status is the "earliest" across all sub-orders, computed on read).
+model SellerOrder {
+  id          String @id @default(uuid())
+  orderId     String
+  sellerId    String
+  storeId     String
+  /// Per-seller order number: SORD-YYYY-MM-XXXXXX
+  orderNumber String @unique
+
+  status        OrderStatus   @default(PENDING)
+  paymentStatus PaymentStatus @default(PENDING)
+  payoutStatus  PayoutStatus  @default(PENDING)
+
+  subtotal         Decimal @db.Decimal(10, 2)
+  taxAmount        Decimal @db.Decimal(10, 2) @default(0)
+  shippingAmount   Decimal @db.Decimal(10, 2) @default(0)
+  discountAmount   Decimal @db.Decimal(10, 2) @default(0)
+  /// Captured from Seller.commissionRate at placement.
+  commissionAmount Decimal @db.Decimal(10, 2) @default(0)
+  /// Net amount payable to the seller after commission.
+  payoutAmount     Decimal @db.Decimal(10, 2) @default(0)
+  currencyCode     String  @default("INR")
+
+  metadata    Json      @default("{}")
+  packedAt    DateTime?
+  shippedAt   DateTime?
+  deliveredAt DateTime?
+  cancelledAt DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  order  Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  store  Store  @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  items  OrderItem[]
+  statusHistory OrderStatusHistory[]
+
+  @@unique([orderId, sellerId])
+  @@index([sellerId, status])
+  @@index([storeId])
+}
+
+/// OrderItem — one row per (variant, quantity) at checkout.
+///
+/// Belongs to BOTH the parent Order and a SellerOrder. Snapshot fields
+/// (sku, name, unitPrice, taxAmount) are populated at placement and
+/// never updated — they form the immutable purchase record.
+model OrderItem {
+  id            String @id @default(uuid())
+  orderId       String
+  sellerOrderId String
+  productId     String
+  variantId     String
+  storeId       String
+
+  /// Snapshots taken at placement.
+  sku            String
+  name           String
+  /// Variant display name (e.g. "Red, Large") — null for SIMPLE products.
+  variantName    String?
+  quantity       Int
+  unitPrice      Decimal @db.Decimal(10, 2)
+  totalPrice     Decimal @db.Decimal(10, 2)
+  taxAmount      Decimal @db.Decimal(10, 2) @default(0)
+  discountAmount Decimal @db.Decimal(10, 2) @default(0)
+
+  /// Variant attributes captured at placement (so we can show
+  /// "Color: Red, Size: M" even if the variant was deleted later).
+  attributesSnapshot Json @default("[]")
+  imageUrlSnapshot   String?
+
+  metadata Json @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order       Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerOrder SellerOrder    @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+  product     Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variant     ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  store       Store          @relation(fields: [storeId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([sellerOrderId])
+  @@index([variantId])
+}
+
+/// OrderStatusHistory — audit trail.
+///
+/// One row per status transition on either the parent Order or a
+/// SellerOrder. Notes who changed it (userId) for accountability.
+/// Hypertable candidate at scale (per architectural docs).
+model OrderStatusHistory {
+  id            String @id @default(uuid())
+  orderId       String?
+  sellerOrderId String?
+
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+
+  /// User who triggered the transition. Null = system (e.g. initial
+  /// PENDING entry created by the placement transaction).
+  changedById String?
+  notes       String?
+
+  createdAt DateTime @default(now())
+
+  order       Order?       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerOrder SellerOrder? @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@index([sellerOrderId, createdAt])
+}

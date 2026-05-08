@@ -8,6 +8,8 @@ import { AuthModule } from './modules/identity/auth/auth.module';
 import { ConfigModule } from "@nestjs/config";
 import { envSchema } from "@/common/config/env.validation";
 import { RoleModule } from './modules/identity/role/role.module';
+import { CustomerModule } from './modules/identity/customer/customer.module';
+import { AddressModule } from './modules/identity/address/address.module';
 import { ThrottlerModule } from "@nestjs/throttler";
 import { APP_GUARD } from "@nestjs/core";
 import { GqlThrottlerGuard } from "./libs/gqlThtottlerGuard.module";
@@ -22,6 +24,15 @@ import { AttributeModule } from './modules/ecommerce/attribute/attribute.module'
 import { ProductModule } from './modules/ecommerce/product/product.module';
 import { InventoryModule } from './modules/ecommerce/inventory/inventory.module';
 import { TaxModule } from './modules/ecommerce/tax/tax.module';
+import { WishlistModule } from './modules/ecommerce/wishlist/wishlist.module';
+import { CartModule } from './modules/ecommerce/cart/cart.module';
+import { OrderModule } from './modules/ecommerce/order/order.module';
+import { PaymentModule } from './modules/ecommerce/payment/payment.module';
+// CMS modules
+import { PageModule } from './modules/cms/page/page.module';
+import { MenuModule } from './modules/cms/menu/menu.module';
+import { SliderModule } from './modules/cms/slider/slider.module';
+import { NewsletterModule } from './modules/cms/newsletter/newsletter.module';
 // Media modules
 import { ImageModule } from './modules/media/image/image.module';
 // Admin modules
@@ -48,6 +59,8 @@ import { AdminThemeModule } from './modules/admin/admin-theme/admin-theme.module
       ],
     }),
     RoleModule,
+    CustomerModule,
+    AddressModule,
     HealthModule,
     // ---- Ecommerce Modules ----
     CategoryModule,
@@ -59,6 +72,15 @@ import { AdminThemeModule } from './modules/admin/admin-theme/admin-theme.module
     ProductModule,
     InventoryModule,
     TaxModule,
+    WishlistModule,
+    CartModule,
+    OrderModule,
+    PaymentModule,
+    // ---- CMS Modules ----
+    PageModule,
+    MenuModule,
+    SliderModule,
+    NewsletterModule,
     // ---- Media Modules ----
     ImageModule,
     // ---- Admin Modules ----

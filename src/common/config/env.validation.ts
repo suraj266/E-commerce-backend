@@ -28,4 +28,9 @@ export const envSchema = Joi.object({
         is: 's3', then: Joi.required(), otherwise: Joi.optional(),
     }),
     AWS_S3_PUBLIC_BASE_URL: Joi.string().optional(),
+
+    // -- Payment module --
+    // 32-byte AES key (64 hex chars) for encrypting gateway credentials in DB.
+    // Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+    PAYMENT_ENCRYPTION_KEY: Joi.string().length(64).required(),
 }).unknown(true)

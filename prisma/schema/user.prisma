@@ -2,7 +2,10 @@ model User {
   id              String    @id @default(uuid())
   name            String
   email           String    @unique
-  phone           String    @unique
+  /// Optional. Sellers require it (enforced at DTO layer); customers and
+  /// admins may sign up without one. Postgres treats NULLs as distinct in
+  /// the unique index, so multiple users without a phone are allowed.
+  phone           String?   @unique
   password        String
   gender          String?
   dateOfBirth     DateTime?
@@ -31,6 +34,27 @@ model User {
   apiKeys   ApiKey[]
   sessions  Session[]
   Seller    Seller?
+  Customer  Customer?
+
+  passwordResetTokens PasswordResetToken[]
+}
+
+/// Single-use token for the forgot-password flow.
+/// Mirrors the EmailVerificationToken pattern (token, expiresAt, usedAt).
+/// In dev the token is returned in the API response so the frontend can
+/// surface a click-through link until SMTP is wired. Production sends
+/// only via email.
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model EmailVerificationToken {
@@ -62,7 +86,9 @@ model UserAddress {
   countryCode  String
   isDefault    Boolean @default(false)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ordersAsShippingAddress Order[] @relation("OrderShippingAddress")
+  ordersAsBillingAddress  Order[] @relation("OrderBillingAddress")
 }
 
 model ApiKey {

@@ -1,0 +1,136 @@
+/// =============================================================================
+/// Payment Gateway Configuration & Transaction Records
+/// =============================================================================
+///
+/// Two models:
+///   1. PaymentGatewayConfig — admin-managed gateway settings. API credentials
+///      are stored AES-256-GCM encrypted; decrypted only at checkout time.
+///   2. Payment — one row per payment attempt on an Order. Tracks gateway
+///      response, status transitions, and refund state.
+///
+/// Design notes:
+///   - Credentials NEVER leave the backend in plaintext. Admin UI shows
+///     masked hints only (e.g. "rzp_test_***").
+///   - Each gateway config stores its own processing fee (fixed or %)
+///     so the admin can charge customers differently per method.
+///   - `webhookUrl` is auto-generated from the backend base URL + gateway
+///     name — shown read-only in the admin panel for copy-paste into
+///     the gateway dashboard.
+
+enum PaymentGateway {
+  COD
+  RAZORPAY
+  STRIPE
+  PHONEPE
+}
+
+enum PaymentTransactionStatus {
+  CREATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  EXPIRED
+}
+
+enum ProcessingFeeType {
+  FIXED
+  PERCENTAGE
+}
+
+enum GatewayPaymentType {
+  WEBSITE_EMBEDDED
+  REDIRECT
+}
+
+/// Admin-managed payment gateway configuration.
+///
+/// One row per gateway. The admin configures credentials, display settings,
+/// and processing fees through the admin panel. Credentials are stored
+/// encrypted in the `credentials` column.
+model PaymentGatewayConfig {
+  id              String            @id @default(uuid())
+  gateway         PaymentGateway    @unique
+  displayName     String            /// e.g. "Pay online via Razorpay"
+  description     String?           /// e.g. "Customer can buy product and pay directly using Visa, Credit card via Razorpay"
+  logoUrl         String?           /// Gateway logo image URL
+  isEnabled       Boolean           @default(false)
+  isDefault       Boolean           @default(false)
+  displayOrder    Int               @default(0)
+
+  /// JSON array of PaymentMethod enum values this gateway supports.
+  /// e.g. ["CARD", "UPI", "NET_BANKING", "WALLET"] for Razorpay
+  supportedMethods Json             @default("[]")
+
+  /// AES-256-GCM encrypted JSON blob: { keyId, keySecret, webhookSecret, ... }
+  /// Decrypted only server-side at checkout time. NEVER sent to frontend.
+  credentials     String            @default("")
+
+  sandboxMode     Boolean           @default(true)
+
+  /// Extra fee charged when customer selects this method. 0 = no fee.
+  processingFee       Decimal       @db.Decimal(10, 2) @default(0)
+  processingFeeType   ProcessingFeeType @default(FIXED)
+
+  /// How the gateway checkout opens on the frontend.
+  paymentType     GatewayPaymentType @default(WEBSITE_EMBEDDED)
+
+  /// Setup instructions shown to admin (Markdown or plain text).
+  /// e.g. "1. Register on Razorpay\n2. Get Client ID..."
+  instructions    String?           @db.Text
+
+  /// Auto-generated: {backendUrl}/webhooks/{gateway} — read-only in admin.
+  webhookUrl      String?
+
+  metadata        Json              @default("{}")
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([isEnabled, displayOrder])
+}
+
+/// Payment — one row per payment attempt on an Order.
+///
+/// Tracks the full lifecycle: CREATED → AUTHORIZED → CAPTURED (success)
+/// or CREATED → FAILED / EXPIRED. Refunds create a new status transition.
+///
+/// The `gatewayResponse` JSON preserves the raw gateway callback for
+/// debugging and audit. `gatewaySignature` is kept for post-hoc verification.
+model Payment {
+  id                String                    @id @default(uuid())
+  orderId           String
+  gateway           PaymentGateway
+  method            PaymentMethod             /// Which instrument was used (CARD, UPI, etc.)
+
+  amount            Decimal                   @db.Decimal(10, 2)
+  processingFee     Decimal                   @db.Decimal(10, 2) @default(0)
+  currency          String                    @default("INR")
+  status            PaymentTransactionStatus  @default(CREATED)
+
+  /// Gateway-specific identifiers
+  gatewayOrderId    String?                   /// e.g. Razorpay order_xxxxx
+  gatewayPaymentId  String?                   /// e.g. Razorpay pay_xxxxx
+  gatewaySignature  String?                   /// Verification signature
+  gatewayResponse   Json                      @default("{}")
+
+  attempts          Int                       @default(0)
+  maxAttempts       Int                       @default(3)
+
+  expiresAt         DateTime?
+  authorizedAt      DateTime?
+  capturedAt        DateTime?
+  failedAt          DateTime?
+  refundedAt        DateTime?
+
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  order             Order                     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([gatewayOrderId])
+  @@index([gatewayPaymentId])
+  @@index([status])
+}
