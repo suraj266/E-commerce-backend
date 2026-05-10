@@ -15,19 +15,25 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
+import { EmailService } from '@/modules/admin/email/email.service';
+import { config } from '@/common/config/config';
 import { OrderPlacementService } from './order-placement.service';
 import { PlaceOrderInput } from './dto/place-order.input';
 import { ORDER_INCLUDE, hydrateOrder } from './order.hydrate';
 
 @Injectable()
 export class OrderService {
+  private readonly logger = new Logger(OrderService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly placement: OrderPlacementService,
+    private readonly email: EmailService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -221,6 +227,35 @@ export class OrderService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
+
+    this.dispatchCancelEmail(orderId, notes).catch((err) =>
+      this.logger.warn(
+        `Cancel email failed for ${orderId}: ${(err as Error).message}`,
+      ),
+    );
+
     return hydrateOrder(fresh);
+  }
+
+  /**
+   * Confirms to the customer that their cancellation request was processed.
+   * Soft-fails — the cancel itself is already committed so a missed email is
+   * a tolerable degradation.
+   */
+  private async dispatchCancelEmail(orderId: string, notes?: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { customer: { include: { user: true } } },
+    });
+    const customerEmail = order?.customer?.user?.email;
+    if (!order || !customerEmail) return;
+
+    await this.email.send('order_cancelled', customerEmail, {
+      customerName: order.customer.user.name ?? 'there',
+      orderNumber: order.orderNumber,
+      cancellationReason: notes ?? 'Cancelled at your request.',
+      orderLink: `${config.FRONTEND_URL ?? ''}/account/orders/${order.id}`,
+      shopName: 'Trueway',
+    });
   }
 }

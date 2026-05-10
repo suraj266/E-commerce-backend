@@ -1,0 +1,100 @@
+/// Email subsystem — admin-configurable SMTP, Handlebars-templated messages,
+/// and a send log for audit/debugging.
+///
+/// Three tables:
+///   - EmailSetting: singleton (id="default") with SMTP credentials. Password
+///     stored encrypted via CryptoService (AES-256-GCM).
+///   - EmailTemplate: per-event message bodies. Editable inline by admin.
+///     `key` is the stable identifier referenced from code (e.g. "password_reset").
+///   - EmailLog: every send attempt. Status + error captured for later retry.
+
+enum EmailMailer {
+  SMTP
+  // Future: SES, RESEND, POSTMARK, SENDGRID
+}
+
+enum EmailEncryption {
+  NONE   // plain TCP
+  TLS    // STARTTLS (typically port 587)
+  SSL    // implicit TLS (typically port 465)
+}
+
+enum EmailTemplateCategory {
+  SYSTEM       // password reset, email verification — always sent, only editable
+  AUTH         // welcome, etc.
+  ORDER        // customer-facing order lifecycle
+  SELLER       // seller notifications
+  ADMIN        // admin alerts (new seller, contact form)
+  NEWSLETTER   // subscription confirmations
+  PARTIAL      // header/footer partials, not sent directly
+}
+
+enum EmailLogStatus {
+  SENT
+  FAILED
+  QUEUED
+}
+
+/// Singleton SMTP configuration. Always exactly one row, id="default".
+model EmailSetting {
+  id           String          @id @default("default")
+  mailer       EmailMailer     @default(SMTP)
+  host         String          @default("")
+  port         Int             @default(587)
+  username     String          @default("")
+  /// AES-256-GCM ciphertext (iv:tag:cipher, all base64). Empty when unset.
+  passwordEnc  String          @default("")
+  encryption   EmailEncryption @default(TLS)
+  senderName   String          @default("")
+  senderEmail  String          @default("")
+  /// Optional EHLO/HELO hostname; leave blank for SMTP default.
+  localDomain  String?
+  /// True once host + username + sender are populated. Read-only flag the
+  /// service refreshes whenever update() runs.
+  isConfigured Boolean         @default(false)
+  updatedAt    DateTime        @updatedAt
+  updatedById  String?
+}
+
+/// One row per template. Seeded with sensible defaults; admin edits in place.
+model EmailTemplate {
+  id           String                 @id @default(uuid())
+  /// Stable identifier referenced from code, e.g. "password_reset". Lowercase
+  /// snake_case. Cannot be renamed once seeded.
+  key          String                 @unique
+  name         String
+  description  String
+  category     EmailTemplateCategory  @default(AUTH)
+  subject      String
+  htmlBody     String
+  /// Optional plaintext alt; auto-derived from html if null.
+  textBody     String?
+  /// Documented variables, e.g. ["customerName","resetLink"]. Drives the
+  /// admin "insert variable" picker chips.
+  variables    String[]               @default([])
+  isEnabled    Boolean                @default(true)
+  /// System templates can be edited but not deleted/disabled (e.g. password
+  /// reset). Toggle exposed in admin grays out for these.
+  isSystem     Boolean                @default(false)
+  updatedAt    DateTime               @updatedAt
+  updatedById  String?
+}
+
+/// Audit log of every send attempt. Used for the admin "Email log" page and
+/// the "retry failed" action. Pruned periodically (TODO: cron job).
+model EmailLog {
+  id           String         @id @default(uuid())
+  templateKey  String
+  toAddress    String
+  subject      String
+  status       EmailLogStatus
+  errorMessage String?
+  /// Snapshot of the variables passed in for this send. Lets a retry
+  /// reconstruct the same message.
+  contextJson  String?
+  sentAt       DateTime       @default(now())
+
+  @@index([sentAt])
+  @@index([templateKey])
+  @@index([status])
+}

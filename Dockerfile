@@ -9,7 +9,7 @@ WORKDIR /app
 # Prisma ko chalne ke liye OpenSSL chahiye jo slim image me nahi hota
 RUN apt-get update -y && apt-get install -y openssl
 
-RUN npm install -g pnpm
+RUN npm install -g pnpm@9
 
 COPY package.json pnpm-lock.yaml ./
 
@@ -20,7 +20,7 @@ RUN npx prisma generate
 
 COPY . .
 
-RUN pnpm build
+RUN pnpm run build
 
 # ==========================================
 # STAGE 2: Production
@@ -33,7 +33,7 @@ WORKDIR /app
 # Prisma ko chalne ke liye OpenSSL chahiye jo slim image me nahi hota
 RUN apt-get update -y && apt-get install -y openssl
 
-RUN npm install -g pnpm
+RUN npm install -g pnpm@9
 
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod

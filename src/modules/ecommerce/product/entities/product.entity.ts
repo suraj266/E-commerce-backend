@@ -72,6 +72,13 @@ export class Product {
   @Field(() => Float, { nullable: true })
   costPrice?: number | null;
 
+  /** price + tax calculated. Computed in the service layer. */
+  @Field(() => Float, {
+    nullable: true,
+    description: 'Price including tax (price + price × taxRate/100). Null if no tax assigned.',
+  })
+  priceWithTax?: number | null;
+
   @Field(() => String, { nullable: true })
   sku?: string | null;
 

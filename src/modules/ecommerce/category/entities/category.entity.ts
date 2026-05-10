@@ -1,5 +1,6 @@
 import { ObjectType, Field, ID, Int } from '@nestjs/graphql';
 
+
 @ObjectType()
 export class Category {
   @Field(() => ID)
@@ -53,5 +54,13 @@ export class Category {
    */
   @Field(() => [Category], { nullable: true })
   children?: Category[] | null;
+
+  /**
+   * Number of active, non-deleted products in this category (and its
+   * descendants). Populated only by `shopFilterCategories` — other
+   * queries leave it undefined.
+   */
+  @Field(() => Int, { nullable: true })
+  productCount?: number | null;
 }
 

@@ -16,17 +16,33 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
+import { EmailService } from '@/modules/admin/email/email.service';
+import { config } from '@/common/config/config';
 import { UpdateSellerOrderStatusInput } from './dto/update-seller-order-status.input';
 import { isValidTransition } from './order.helpers';
 import { SELLER_ORDER_INCLUDE, hydrateSellerOrder } from './order.hydrate';
 
+const STATUS_TO_TEMPLATE: Partial<Record<OrderStatus, string>> = {
+  CONFIRMED: 'order_confirmed',
+  SHIPPED: 'order_shipped',
+  DELIVERED: 'order_delivered',
+  CANCELLED: 'order_cancelled',
+  REFUNDED: 'order_refunded',
+};
+
 @Injectable()
 export class SellerOrderService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(SellerOrderService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Identity helper
@@ -214,6 +230,78 @@ export class SellerOrderService {
       where: { id: existing.id },
       include: SELLER_ORDER_INCLUDE,
     });
+
+    // Post-transition customer email — fire-and-forget, soft-fail.
+    this.dispatchStatusEmail(existing.id, input.status, input.notes).catch(
+      (err) =>
+        this.logger.warn(
+          `Status email failed for ${existing.id}: ${(err as Error).message}`,
+        ),
+    );
+
     return hydrateSellerOrder(fresh);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Customer-facing status emails
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Sends the appropriate template to the customer when their seller-order
+   * slice transitions. Maps OrderStatus → template key via STATUS_TO_TEMPLATE.
+   * No-op when the new status doesn't have a template (e.g. PACKED is an
+   * internal-only state).
+   */
+  private async dispatchStatusEmail(
+    sellerOrderId: string,
+    newStatus: OrderStatus,
+    notes: string | null | undefined,
+  ): Promise<void> {
+    const templateKey = STATUS_TO_TEMPLATE[newStatus];
+    if (!templateKey) return;
+
+    const so = await this.prisma.sellerOrder.findUnique({
+      where: { id: sellerOrderId },
+      include: {
+        order: {
+          include: { customer: { include: { user: true } } },
+        },
+        store: { include: { seller: true } },
+      },
+    });
+    const customerEmail = so?.order?.customer?.user?.email;
+    if (!so || !customerEmail) return;
+
+    const customerName = so.order.customer.user.name ?? 'there';
+    const sellerName =
+      so.store?.seller?.displayName ?? so.store?.name ?? 'the seller';
+    const frontendUrl = config.FRONTEND_URL ?? '';
+
+    await this.email.send(templateKey, customerEmail, {
+      customerName,
+      sellerName,
+      orderNumber: so.orderNumber,
+      orderLink: `${frontendUrl}/account/orders/${so.orderId}`,
+      // Status-specific values — extras are simply ignored by templates that
+      // don't reference them.
+      cancellationReason: notes ?? 'No reason provided.',
+      refundAmount: formatRupees(Number(so.subtotal)),
+      // Tracking fields are TODO once shipping integration lands.
+      trackingNumber: 'Pending',
+      trackingLink: `${frontendUrl}/account/orders/${so.orderId}`,
+      shopName: 'Trueway',
+    });
+  }
+}
+
+function formatRupees(amount: number): string {
+  try {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `₹${Math.round(amount).toLocaleString('en-IN')}`;
   }
 }

@@ -26,6 +26,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import { verify, hash } from 'argon2';
 import { JwtService } from '@nestjs/jwt';
 import { config } from '@/common/config/config';
+import { EmailService } from '@/modules/admin/email/email.service';
 
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h — short window
@@ -38,8 +39,15 @@ export class AuthService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService
+    private readonly jwtService: JwtService,
+    private readonly email: EmailService,
   ) { }
+
+  // Common context applied to every email — domain-derived `shopName` could
+  // come from a SiteSetting later; for now we derive a sane default.
+  private get shopName(): string {
+    return 'Trueway';
+  }
 
   // ========================
   // SELLER REGISTRATION
@@ -85,13 +93,22 @@ export class AuthService {
     });
 
     const token = await this.issueEmailVerificationToken(user.id);
+    const verificationUrl = `${config.FRONTEND_URL ?? ''}/seller/verify-email?token=${token}`;
+
+    // Best-effort send — soft-fails if SMTP isn't configured. We still return
+    // the token + URL so dev / staging flows continue to work.
+    await this.email.send('email_verification', user.email, {
+      customerName: user.name,
+      verificationLink: verificationUrl,
+      shopName: this.shopName,
+    });
 
     return {
       message: 'Registration successful. Please verify your email.',
       userId: user.id,
       // Dev convenience — exposes the token. Remove or gate by NODE_ENV in prod.
       verificationToken: token,
-      verificationUrl: `${config.FRONTEND_URL ?? ''}/seller/verify-email?token=${token}`,
+      verificationUrl,
     };
   }
 
@@ -143,13 +160,20 @@ export class AuthService {
     });
 
     const token = await this.issueEmailVerificationToken(user.id);
+    const verificationUrl = `${config.FRONTEND_URL ?? ''}/verify-email?token=${token}`;
+
+    await this.email.send('email_verification', user.email, {
+      customerName: user.name,
+      verificationLink: verificationUrl,
+      shopName: this.shopName,
+    });
 
     return {
       message: 'Registration successful. Please verify your email.',
       userId: user.id,
       // Dev convenience — exposes the token. Gate by NODE_ENV in prod.
       verificationToken: token,
-      verificationUrl: `${config.FRONTEND_URL ?? ''}/verify-email?token=${token}`,
+      verificationUrl,
     };
   }
 
@@ -178,6 +202,13 @@ export class AuthService {
       }),
     ]);
 
+    // Welcome message — fired once after first verification. Soft-fails so
+    // a misconfigured SMTP doesn't block the verification response.
+    await this.email.send('welcome', record.user.email, {
+      customerName: record.user.name,
+      shopName: this.shopName,
+    });
+
     return {
       message: 'Email verified successfully',
       email: record.user.email,
@@ -201,10 +232,18 @@ export class AuthService {
     });
 
     const token = await this.issueEmailVerificationToken(user.id);
+    const verificationUrl = `${config.FRONTEND_URL ?? ''}/seller/verify-email?token=${token}`;
+
+    await this.email.send('email_verification', user.email, {
+      customerName: user.name,
+      verificationLink: verificationUrl,
+      shopName: this.shopName,
+    });
+
     return {
       message: 'Verification link sent.',
       verificationToken: token,
-      verificationUrl: `${config.FRONTEND_URL ?? ''}/seller/verify-email?token=${token}`,
+      verificationUrl,
     };
   }
 
@@ -439,11 +478,19 @@ export class AuthService {
       },
     });
 
+    const resetUrl = `${config.FRONTEND_URL ?? ''}/reset-password?token=${token}`;
+
+    await this.email.send('password_reset', user.email, {
+      customerName: user.name,
+      resetLink: resetUrl,
+      shopName: this.shopName,
+    });
+
     return {
       message: 'If the email exists, a reset link was sent.',
       // Dev convenience — strip these in prod (gate by NODE_ENV).
       resetToken: token,
-      resetUrl: `${config.FRONTEND_URL ?? ''}/reset-password?token=${token}`,
+      resetUrl,
     };
   }
 

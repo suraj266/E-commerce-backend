@@ -63,6 +63,8 @@ model Product {
   /// Shape: [{ name: string, order: int, items: [{ label, value, order }] }]
   specifications   Json          @default("[]")
   metadata         Json          @default("{}")
+  /// Cached lowest variant price for fast database sorting (Phase B optimization)
+  basePrice        Decimal?      @db.Decimal(10, 2)
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   deletedAt        DateTime?

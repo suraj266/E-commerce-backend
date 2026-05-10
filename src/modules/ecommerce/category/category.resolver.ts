@@ -28,6 +28,17 @@ export class CategoryResolver {
   }
 
   /**
+   * Lightweight query for the shop page filter rail — returns only root
+   * categories that contain at least one ACTIVE product (directly or via
+   * descendants), each annotated with `productCount`.
+   */
+  @Query(() => [Category], { name: 'shopFilterCategories' })
+  shopFilterCategories() {
+    return this.categoryService.findShopFilterCategories();
+  }
+
+
+  /**
    * Children of a given parent (or root categories when parentId omitted).
    * Powers the cascading category picker on the product form. Each result
    * carries `hasChildren` so the UI knows whether to show the next-level

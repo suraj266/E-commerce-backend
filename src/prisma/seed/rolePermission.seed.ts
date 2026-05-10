@@ -97,6 +97,12 @@ const permissions = [
     { module: "payment", action: "read", description: "Read payment gateway configs and transactions" },
     { module: "payment", action: "create", description: "Create payment gateway config" },
     { module: "payment", action: "update", description: "Update payment gateway config / toggle / set default" },
+    // Site Settings Management
+    { module: "setting", action: "read", description: "Read site settings" },
+    { module: "setting", action: "update", description: "Update site settings" },
+    // Email Settings & Templates
+    { module: "email", action: "read", description: "Read email settings + templates + log" },
+    { module: "email", action: "update", description: "Update email settings, edit templates, send test email" },
 ]
 
 async function main() {

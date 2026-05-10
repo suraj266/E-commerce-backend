@@ -50,28 +50,35 @@ function hydrate(p: any) {
 
   // Format each variant the same way the variant resolver does — converts
   // Decimal → number, formats the attribute junction, etc.
+  const taxRate = p.tax?.rate != null ? Number(p.tax.rate) : null;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const formattedVariants = variants.map((v: any) => ({
-    ...v,
-    price: Number(v.price),
-    compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
-    costPrice: v.costPrice != null ? Number(v.costPrice) : null,
-    weight: v.weight != null ? Number(v.weight) : null,
-    length: v.length != null ? Number(v.length) : null,
-    width: v.width != null ? Number(v.width) : null,
-    height: v.height != null ? Number(v.height) : null,
-    attributes: (v.attributes ?? []).map(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (a: any) => ({
-        attributeId: a.attributeId,
-        attributeValueId: a.attributeValueId,
-        attributeName: a.attribute?.name ?? '',
-        attributeSlug: a.attribute?.slug ?? '',
-        value: a.attributeValue?.value ?? '',
-        valueSlug: a.attributeValue?.slug ?? '',
-      }),
-    ),
-  }));
+  const formattedVariants = variants.map((v: any) => {
+    const vPrice = Number(v.price);
+    return {
+      ...v,
+      price: vPrice,
+      priceWithTax:
+        taxRate != null ? Math.round((vPrice + vPrice * taxRate / 100) * 100) / 100 : null,
+      compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
+      costPrice: v.costPrice != null ? Number(v.costPrice) : null,
+      weight: v.weight != null ? Number(v.weight) : null,
+      length: v.length != null ? Number(v.length) : null,
+      width: v.width != null ? Number(v.width) : null,
+      height: v.height != null ? Number(v.height) : null,
+      attributes: (v.attributes ?? []).map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (a: any) => ({
+          attributeId: a.attributeId,
+          attributeValueId: a.attributeValueId,
+          attributeName: a.attribute?.name ?? '',
+          attributeSlug: a.attribute?.slug ?? '',
+          value: a.attributeValue?.value ?? '',
+          valueSlug: a.attributeValue?.slug ?? '',
+        }),
+      ),
+    };
+  });
 
   // For VARIABLE products, top-level price = min(variant prices) so storefront
   // listings can show "Starting from ₹X". SIMPLE products just expose the one.
@@ -98,9 +105,15 @@ function hydrate(p: any) {
     sku = defaultVariant.sku ?? null;
   }
 
+  const priceWithTax =
+    price != null && taxRate != null
+      ? Math.round((price + price * taxRate / 100) * 100) / 100
+      : null;
+
   return {
     ...p,
     price,
+    priceWithTax,
     compareAtPrice,
     costPrice,
     sku,
@@ -198,6 +211,40 @@ export class ProductService {
       throw new ForbiddenException('You do not own this product.');
     }
     return product;
+  }
+
+  /**
+   * Recalculates the lowest variant price and caches it on the Product model
+   * for efficient database-level sorting (Phase B optimization).
+   */
+  private async syncBasePrice(productId: string, tx?: Prisma.TransactionClient) {
+    const client = tx || this.prisma;
+
+    // Find all active variants
+    const variants = await client.productVariant.findMany({
+      where: { productId, deletedAt: null },
+      select: { price: true },
+    });
+
+    if (variants.length === 0) {
+      // If no variants, clear basePrice
+      await client.product.update({
+        where: { id: productId },
+        data: { basePrice: null },
+      });
+      return;
+    }
+
+    // lowest price among active variants
+    const minPrice = variants.reduce((min, v) => {
+      const p = Number(v.price);
+      return p < min ? p : min;
+    }, Number(variants[0].price));
+
+    await client.product.update({
+      where: { id: productId },
+      data: { basePrice: minPrice },
+    });
   }
 
   private async validateBrand(brandId?: string | null) {
@@ -301,6 +348,11 @@ export class ProductService {
           input.storeId,
           tx,
         );
+        // Sync basePrice for simple product
+        await tx.product.update({
+          where: { id: product.id },
+          data: { basePrice: input.price! },
+        });
       }
 
       return product;
@@ -411,6 +463,10 @@ export class ProductService {
         }
       }
     });
+
+    if (Object.keys(variantData).length > 0) {
+      await this.syncBasePrice(product.id);
+    }
 
     return this.findOneById(product.id);
   }
@@ -684,38 +740,19 @@ export class ProductService {
       ...(hasPriceFilter ? { variants: { some: priceVariantFilter } } : {}),
     };
 
-    // Price-sort needs in-memory ordering (Prisma can't order by relation
-    // aggregates). For NEWEST we let the DB do it, then paginate after.
-    if (
-      filter.sort === ProductSortOrder.PRICE_ASC ||
-      filter.sort === ProductSortOrder.PRICE_DESC
-    ) {
-      const all = await this.prisma.product.findMany({
-        where,
-        include: PRODUCT_INCLUDE,
-      });
-      const hydrated = all.map(hydrate);
-      hydrated.sort((a, b) => {
-        const pa = a.price ?? 0;
-        const pb = b.price ?? 0;
-        return filter.sort === ProductSortOrder.PRICE_ASC ? pa - pb : pb - pa;
-      });
-      const totalCount = hydrated.length;
-      const start = (page - 1) * pageSize;
-      return {
-        items: hydrated.slice(start, start + pageSize),
-        totalCount,
-        totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
-        currentPage: page,
-        pageSize,
-      };
+    // Order determines how we slice.
+    let orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
+    if (filter.sort === ProductSortOrder.PRICE_ASC) {
+      orderBy = { basePrice: 'asc' };
+    } else if (filter.sort === ProductSortOrder.PRICE_DESC) {
+      orderBy = { basePrice: 'desc' };
     }
 
     const [rows, totalCount] = await this.prisma.$transaction([
       this.prisma.product.findMany({
         where,
         include: PRODUCT_INCLUDE,
-        orderBy: { createdAt: 'desc' },
+        orderBy,
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -1182,6 +1219,8 @@ export class ProductService {
       created.push({ id: variant.id });
     }
 
+    await this.syncBasePrice(product.id);
+
     return this.myProductVariants(userId, product.id);
   }
 
@@ -1261,6 +1300,7 @@ export class ProductService {
       variant.id,
       product.storeId,
     );
+    await this.syncBasePrice(product.id);
     return this.formatVariant(variant);
   }
 
@@ -1294,6 +1334,7 @@ export class ProductService {
         attributes: { include: { attribute: true, attributeValue: true } },
       },
     });
+    await this.syncBasePrice(variant.productId);
     return this.formatVariant(updated);
   }
 
@@ -1320,6 +1361,7 @@ export class ProductService {
         },
       }),
     ]);
+    await this.syncBasePrice(variant.productId);
     return this.formatVariant(updated);
   }
 
@@ -1358,6 +1400,9 @@ export class ProductService {
     if (input.status !== undefined) data.status = input.status;
 
     const result = await this.prisma.productVariant.updateMany({ where, data });
+    if (input.price !== undefined) {
+      await this.syncBasePrice(input.productId);
+    }
     return result.count;
   }
 }

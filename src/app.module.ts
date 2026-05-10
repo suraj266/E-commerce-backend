@@ -37,6 +37,8 @@ import { NewsletterModule } from './modules/cms/newsletter/newsletter.module';
 import { ImageModule } from './modules/media/image/image.module';
 // Admin modules
 import { AdminThemeModule } from './modules/admin/admin-theme/admin-theme.module';
+import { SiteSettingModule } from './modules/admin/site-setting/site-setting.module';
+import { EmailModule } from './modules/admin/email/email.module';
 
 
 @Module({
@@ -85,6 +87,8 @@ import { AdminThemeModule } from './modules/admin/admin-theme/admin-theme.module
     ImageModule,
     // ---- Admin Modules ----
     AdminThemeModule,
+    SiteSettingModule,
+    EmailModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: GqlThrottlerGuard }],

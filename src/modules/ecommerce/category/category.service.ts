@@ -35,6 +35,71 @@ export class CategoryService {
   }
 
   /**
+   * Returns only root (top-level) categories that have at least one ACTIVE
+   * product — either directly assigned or assigned to any descendant category.
+   * Each result includes `productCount` so the shop filter can display
+   * "Electronics (5)". This replaces the old approach of fetching ALL 100+
+   * categories and filtering client-side.
+   */
+  async findShopFilterCategories() {
+    // Step 1 — Collect ALL category ids that own at least one active product.
+    const catsWithProducts = await this.prisma.category.findMany({
+      where: {
+        deletedAt: null,
+        isActive: true,
+        products: {
+          some: { status: 'ACTIVE', deletedAt: null },
+        },
+      },
+      select: {
+        id: true,
+        parentId: true,
+        _count: { select: { products: { where: { status: 'ACTIVE', deletedAt: null } } } },
+      },
+    });
+
+    if (catsWithProducts.length === 0) return [];
+
+    // Step 2 — Walk each category up to its root so we know which root
+    // categories should appear in the filter. We also accumulate product
+    // counts per root.
+    const allCategories = await this.prisma.category.findMany({
+      where: { deletedAt: null },
+      select: { id: true, parentId: true },
+    });
+    const parentMap = new Map<string, string | null>(
+      allCategories.map((c) => [c.id, c.parentId]),
+    );
+
+    // rootId → total product count across all descendants
+    const rootCounts = new Map<string, number>();
+
+    for (const cat of catsWithProducts) {
+      // Walk up to find the root
+      let cursor: string | null = cat.id;
+      let rootId = cat.id;
+      for (let depth = 0; depth < 15 && cursor; depth++) {
+        rootId = cursor;
+        cursor = parentMap.get(cursor) ?? null;
+      }
+      rootCounts.set(rootId, (rootCounts.get(rootId) ?? 0) + cat._count.products);
+    }
+
+    // Step 3 — Fetch the actual root category rows
+    const rootIds = [...rootCounts.keys()];
+    const roots = await this.prisma.category.findMany({
+      where: { id: { in: rootIds }, isActive: true, deletedAt: null },
+      orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+    });
+
+    return roots.map((r) => ({
+      ...r,
+      productCount: rootCounts.get(r.id) ?? 0,
+    }));
+  }
+
+
+  /**
    * Children of a given parent (or root categories when parentId is null).
    * Each result carries `hasChildren` so the cascading picker UI knows
    * whether to render the next-level dropdown.

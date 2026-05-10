@@ -53,7 +53,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma, OrderStatus, PaymentStatus } from '@prisma/client';
+import { Logger } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
+import { EmailService } from '@/modules/admin/email/email.service';
+import { config } from '@/common/config/config';
 import { PlaceOrderInput } from './dto/place-order.input';
 import { generateOrderNumber } from './order.helpers';
 import { ORDER_INCLUDE, hydrateOrder } from './order.hydrate';
@@ -82,9 +85,27 @@ interface PlannedItem {
   deductions: InventoryDeduction[];
 }
 
+/** Format a numeric amount as INR for email bodies. ₹1,49,500 etc. */
+function formatRupees(amount: number): string {
+  try {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `₹${Math.round(amount).toLocaleString('en-IN')}`;
+  }
+}
+
 @Injectable()
 export class OrderPlacementService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(OrderPlacementService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Identity helpers (same pattern as cart/wishlist — customer-only)
@@ -396,7 +417,75 @@ export class OrderPlacementService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
+
+    // Fire-and-forget post-placement emails (customer confirmation +
+    // per-seller new-order alerts). Wrapped in try/catch — any failure here
+    // must NOT roll back the order or surface to the caller.
+    this.dispatchPlacementEmails(orderId).catch((err) => {
+      this.logger.warn(
+        `Post-placement email dispatch failed for ${orderId}: ${(err as Error).message}`,
+      );
+    });
+
     return hydrateOrder(fresh);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Post-placement email dispatch
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Sends `order_placed` to the customer + `seller_new_order` to each seller.
+   * Runs AFTER the placement transaction commits so emails reflect the
+   * canonical DB state. Soft-fails per-recipient — one bad address doesn't
+   * block the others.
+   */
+  private async dispatchPlacementEmails(orderId: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        customer: { include: { user: true } },
+        sellerOrders: {
+          include: {
+            store: { include: { seller: { include: { user: true } } } },
+            items: true,
+          },
+        },
+      },
+    });
+    if (!order) return;
+
+    const shopName = 'Trueway';
+    const frontendUrl = config.FRONTEND_URL ?? '';
+    const totalAmount = formatRupees(Number(order.totalAmount));
+
+    // ---- Customer confirmation ----
+    const customerEmail = order.customer?.user?.email;
+    const customerName = order.customer?.user?.name ?? 'there';
+    if (customerEmail) {
+      await this.email.send('order_placed', customerEmail, {
+        customerName,
+        orderNumber: order.orderNumber,
+        totalAmount,
+        orderLink: `${frontendUrl}/account/orders/${order.id}`,
+        shopName,
+      });
+    }
+
+    // ---- Per-seller new-order alerts ----
+    for (const so of order.sellerOrders) {
+      const sellerUser = so.store?.seller?.user;
+      if (!sellerUser?.email) continue;
+      const itemCount = so.items.reduce((s, i) => s + i.quantity, 0);
+      await this.email.send('seller_new_order', sellerUser.email, {
+        sellerName: so.store?.seller?.displayName ?? sellerUser.name,
+        orderNumber: so.orderNumber,
+        itemCount: String(itemCount),
+        subtotal: formatRupees(Number(so.subtotal)),
+        orderLink: `${frontendUrl}/seller/orders/${so.id}`,
+        shopName,
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------

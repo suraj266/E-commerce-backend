@@ -4,6 +4,7 @@ import { OrderPlacementService } from './order-placement.service';
 import { OrderResolver } from './order.resolver';
 import { SellerOrderService } from './seller-order.service';
 import { SellerOrderResolver } from './seller-order.resolver';
+import { EmailModule } from '@/modules/admin/email/email.module';
 
 /**
  * Order module — Phase 5.
@@ -18,6 +19,7 @@ import { SellerOrderResolver } from './seller-order.resolver';
  * ORDER_FLOW.md for the rationale and what comes next.
  */
 @Module({
+  imports: [EmailModule],
   providers: [
     OrderPlacementService,
     OrderService,

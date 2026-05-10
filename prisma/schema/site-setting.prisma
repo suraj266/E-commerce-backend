@@ -1,0 +1,32 @@
+/// Global site settings — key-value store for admin-configurable options.
+/// Used for tax display, currency, SEO defaults, and future feature flags.
+///
+/// Each row is a single setting. Settings are grouped by category for the
+/// admin UI and identified by a unique `key`.
+
+enum SettingGroup {
+  GENERAL
+  CHECKOUT
+  TAX
+  SEO
+  EMAIL
+}
+
+enum SettingValueType {
+  BOOLEAN
+  STRING
+  NUMBER
+  JSON
+}
+
+model SiteSetting {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  value       String           // stored as string; cast by valueType
+  group       SettingGroup     @default(GENERAL)
+  label       String           // human-readable name for admin UI
+  description String?          // helper text shown below the input
+  valueType   SettingValueType @default(STRING)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}

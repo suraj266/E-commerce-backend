@@ -56,6 +56,13 @@ export class ProductVariant {
   @Field(() => Float, { nullable: true })
   costPrice?: number | null;
 
+  /** price + tax calculated. Computed in the service layer. */
+  @Field(() => Float, {
+    nullable: true,
+    description: 'Price including tax. Null if parent product has no tax.',
+  })
+  priceWithTax?: number | null;
+
   @Field(() => String, { nullable: true })
   barcode?: string | null;
 
