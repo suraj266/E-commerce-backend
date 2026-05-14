@@ -74,6 +74,13 @@ model Order {
   totalAmount    Decimal @db.Decimal(10, 2)
   currencyCode   String  @default("INR")
 
+  /// Optional coupon applied at placement. `couponCode` is snapshotted so
+  /// historical orders still render the code even if the Coupon row is
+  /// later edited or soft-deleted. FK uses SetNull — we never want to lose
+  /// orders just because a coupon was archived.
+  couponId   String?
+  couponCode String?
+
   /// FK to UserAddress (since it covers all users; future split to
   /// CustomerAddress will migrate this — see playbook step 4).
   shippingAddressId String?
@@ -94,14 +101,17 @@ model Order {
   customer        Customer             @relation(fields: [customerId], references: [id], onDelete: Restrict)
   shippingAddress UserAddress?         @relation("OrderShippingAddress", fields: [shippingAddressId], references: [id])
   billingAddress  UserAddress?         @relation("OrderBillingAddress", fields: [billingAddressId], references: [id])
+  coupon          Coupon?              @relation(fields: [couponId], references: [id], onDelete: SetNull)
   sellerOrders    SellerOrder[]
   items           OrderItem[]
   statusHistory   OrderStatusHistory[]
   payments        Payment[]
+  couponRedemption CouponRedemption?
 
   @@index([customerId])
   @@index([status])
   @@index([placedAt])
+  @@index([couponId])
 }
 
 /// SellerOrder — one row per seller per parent Order.

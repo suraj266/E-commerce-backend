@@ -5,6 +5,7 @@ import { OrderResolver } from './order.resolver';
 import { SellerOrderService } from './seller-order.service';
 import { SellerOrderResolver } from './seller-order.resolver';
 import { EmailModule } from '@/modules/admin/email/email.module';
+import { CouponModule } from '@/modules/ecommerce/coupon/coupon.module';
 
 /**
  * Order module — Phase 5.
@@ -19,7 +20,7 @@ import { EmailModule } from '@/modules/admin/email/email.module';
  * ORDER_FLOW.md for the rationale and what comes next.
  */
 @Module({
-  imports: [EmailModule],
+  imports: [EmailModule, CouponModule],
   providers: [
     OrderPlacementService,
     OrderService,

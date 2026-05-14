@@ -1,15 +1,37 @@
+/// Promotions — coupon codes the customer enters at checkout.
+///
+/// v1 scope:
+///   - Single coupon per order (no stacking).
+///   - Discount on subtotal only (not shipping).
+///   - Platform absorbs the discount: each SellerOrder.discountAmount is
+///     allocated proportionally for accounting, but seller payoutAmount is
+///     computed BEFORE the discount, so seller payout is untouched.
+///   - usageLimit (total) + usageLimitPerUser are enforced by counting
+///     CouponRedemption rows at validation/redemption time.
+
 model Coupon {
   id                    String    @id @default(uuid())
-  storeId               String? // null means platform-wide
+  /// Null = platform-wide. When set, every cart item must belong to this
+  /// store for the coupon to apply.
+  storeId               String?
+  /// Customer-facing redeem string. Stored as-typed; we uppercase + trim
+  /// at validation time to keep the match case-insensitive.
   code                  String    @unique
   name                  String
   description           String?
-  discountType          String // percentage, fixed_amount
+  /// Either "percentage" or "fixed_amount". (No enum — keeps the field
+  /// pluggable without a migration when we add things like "free_shipping"
+  /// later.)
+  discountType          String
   discountValue         Decimal   @db.Decimal(10, 2)
   minimumPurchaseAmount Decimal?  @db.Decimal(10, 2)
+  /// Caps a percentage coupon's payout (e.g. "20% off, up to ₹500").
+  /// Ignored for fixed_amount coupons.
   maximumDiscountAmount Decimal?  @db.Decimal(10, 2)
-  usageLimit            Int? // Total limit
-  usageLimitPerUser     Int? // Limit per user
+  /// Total redemptions allowed across all customers. Null = unlimited.
+  usageLimit            Int?
+  /// Redemptions allowed per customer. Null = unlimited.
+  usageLimitPerUser     Int?
   validFrom             DateTime
   validUntil            DateTime
   isActive              Boolean   @default(true)
@@ -18,5 +40,32 @@ model Coupon {
   updatedAt             DateTime  @updatedAt
   deletedAt             DateTime?
 
-  store Store? @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  store       Store?             @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  orders      Order[]
+  redemptions CouponRedemption[]
+
+  @@index([code])
+  @@index([isActive])
+  @@index([validUntil])
+}
+
+/// One row per (coupon, order) pair. Used to enforce usageLimit and
+/// usageLimitPerUser without scanning Order. The unique constraint on
+/// orderId guarantees idempotency — re-running the placement transaction
+/// will not double-count.
+model CouponRedemption {
+  id             String   @id @default(uuid())
+  couponId       String
+  orderId        String   @unique
+  customerId     String
+  discountAmount Decimal  @db.Decimal(10, 2)
+  redeemedAt     DateTime @default(now())
+
+  coupon   Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  order    Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@index([couponId])
+  @@index([customerId])
+  @@index([redeemedAt])
 }

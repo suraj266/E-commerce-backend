@@ -514,34 +514,26 @@ export class InventoryService {
   }
 
   // ---------------------------------------------------------------------------
-  // Reservation hooks — STUBS for Sprint 2.8 (orders).
-  // Wired here so the Order pipeline has a clean import target later.
+  // Reservation / commit / release lifecycle
+  //
+  // These three operations are performed INLINE by the order pipeline rather
+  // than going through this service, because each one needs to participate
+  // in the same Prisma transaction as the order/sellerOrder writes. Pointers:
+  //
+  //   - Reserve  → order-placement.service.ts (placeOrder transaction)
+  //                decrement quantityAvailable, increment quantityReserved
+  //
+  //   - Commit   → seller-order.service.ts (updateStatus → SHIPPED branch)
+  //                decrement quantityOnHand, decrement quantityReserved
+  //
+  //   - Release  → order.service.ts cancelMyOrder + seller-order.service.ts
+  //                updateStatus → CANCELLED branch
+  //                increment quantityAvailable, decrement quantityReserved
+  //
+  // If a future refactor wants to centralise these, the right move is to
+  // expose helpers that accept a `tx` parameter so the caller still owns the
+  // transaction boundary. Don't reintroduce stand-alone reserve()/commit()
+  // methods that open their own transactions — that's how you double-debit
+  // inventory under contention.
   // ---------------------------------------------------------------------------
-
-  /** TODO Sprint 2.8: move available → reserved. Currently throws. */
-  async reserve(_args: {
-    variantId: string;
-    warehouseId: string;
-    quantity: number;
-    referenceType: string;
-    referenceId: string;
-  }) {
-    throw new BadRequestException(
-      'Reservation API is not enabled until Sprint 2.8 (orders).',
-    );
-  }
-
-  /** TODO Sprint 2.8: undo a reservation (cart abandoned, payment failed). */
-  async release(_args: { referenceId: string }) {
-    throw new BadRequestException(
-      'Release API is not enabled until Sprint 2.8 (orders).',
-    );
-  }
-
-  /** TODO Sprint 2.8: reserved → onHand decrement (after shipment). */
-  async commit(_args: { referenceId: string }) {
-    throw new BadRequestException(
-      'Commit API is not enabled until Sprint 2.8 (orders).',
-    );
-  }
 }

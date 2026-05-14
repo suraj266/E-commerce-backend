@@ -103,6 +103,11 @@ const permissions = [
     // Email Settings & Templates
     { module: "email", action: "read", description: "Read email settings + templates + log" },
     { module: "email", action: "update", description: "Update email settings, edit templates, send test email" },
+    // Coupons
+    { module: "coupon", action: "read", description: "Read coupons" },
+    { module: "coupon", action: "create", description: "Create coupon" },
+    { module: "coupon", action: "update", description: "Update coupon" },
+    { module: "coupon", action: "delete", description: "Soft-delete coupon" },
 ]
 
 async function main() {

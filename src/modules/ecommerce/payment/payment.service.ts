@@ -88,6 +88,7 @@ export class PaymentService {
       billingAddressId: input.billingAddressId,
       paymentMethod: orderPaymentMethod,
       customerNotes: input.customerNotes,
+      couponCode: input.couponCode,
     }, paymentStatus);
 
     // Calculate processing fee

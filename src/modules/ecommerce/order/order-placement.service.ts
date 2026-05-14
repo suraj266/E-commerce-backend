@@ -56,6 +56,7 @@ import { Prisma, OrderStatus, PaymentStatus } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
+import { CouponService } from '@/modules/ecommerce/coupon/coupon.service';
 import { config } from '@/common/config/config';
 import { PlaceOrderInput } from './dto/place-order.input';
 import { generateOrderNumber } from './order.helpers';
@@ -105,6 +106,7 @@ export class OrderPlacementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
+    private readonly coupon: CouponService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -237,20 +239,31 @@ export class OrderPlacementService {
     const orderNumberSuffix = generateOrderNumber('ORD').replace('ORD-', '');
     const parentOrderNumber = `ORD-${orderNumberSuffix}`;
 
+    // ---- Step 4a: Per-line subtotals (pre-discount) ------------------------
+    // Build the seller-order shells now so we can run coupon validation
+    // against accurate per-store subtotals. Tax + commission + payout are
+    // computed LATER, after any per-line discount allocation, so GST lands
+    // on the discounted taxable value (CGST Act §15(3)(a)).
+    interface LineMath {
+      lineSubtotal: number;
+      lineDiscount: number;   // share of the coupon's per-store discount
+      lineTax: number;        // GST on (subtotal - discount)
+    }
+    const lineMaths: LineMath[][] = []; // parallel to sellerOrderRows order
+
     const sellerOrderRows: {
       id: string;
       sellerId: string;
       storeId: string;
       orderNumber: string;
-      subtotal: number;
-      taxAmount: number;
+      subtotal: number;       // pre-discount, shown on invoice as gross
+      taxAmount: number;      // GST on (subtotal - discount), GST-correct
+      discountAmount: number; // sum of per-line discounts
       commissionAmount: number;
       payoutAmount: number;
+      commissionRate: number; // captured for the post-discount recompute
       items: PlannedItem[];
     }[] = [];
-
-    let parentSubtotal = 0;
-    let parentTax = 0;
 
     for (const [, items] of groups) {
       const seller = await this.prisma.seller.findUnique({
@@ -259,19 +272,12 @@ export class OrderPlacementService {
       });
       const commissionRate = Number(seller?.commissionRate ?? 0);
 
-      let soSubtotal = 0;
-      let soTax = 0;
-      for (const it of items) {
-        const lineSubtotal = it.unitPrice * it.quantity;
-        const lineTax = (lineSubtotal * it.taxRate) / 100;
-        soSubtotal += lineSubtotal;
-        soTax += lineTax;
-      }
-      const commissionAmount = (soSubtotal * commissionRate) / 100;
-      const payoutAmount = soSubtotal + soTax - commissionAmount;
-
-      parentSubtotal += soSubtotal;
-      parentTax += soTax;
+      const itemMaths: LineMath[] = items.map((it) => ({
+        lineSubtotal: it.unitPrice * it.quantity,
+        lineDiscount: 0,
+        lineTax: 0,
+      }));
+      const soSubtotal = itemMaths.reduce((s, m) => s + m.lineSubtotal, 0);
 
       sellerOrderRows.push({
         id: randomUUID(),
@@ -279,11 +285,14 @@ export class OrderPlacementService {
         storeId: items[0].storeId,
         orderNumber: `SORD-${orderNumberSuffix}`,
         subtotal: round2(soSubtotal),
-        taxAmount: round2(soTax),
-        commissionAmount: round2(commissionAmount),
-        payoutAmount: round2(payoutAmount),
+        taxAmount: 0,        // filled in step 4c
+        discountAmount: 0,   // filled in step 4c
+        commissionAmount: 0, // filled in step 4c
+        payoutAmount: 0,     // filled in step 4c
+        commissionRate,
         items,
       });
+      lineMaths.push(itemMaths);
     }
 
     // SellerOrder.orderNumber is unique — disambiguate if 2+ sub-orders.
@@ -293,7 +302,94 @@ export class OrderPlacementService {
       });
     }
 
-    const totalAmount = parentSubtotal + parentTax;
+    // ---- Step 4b: Coupon validation -----------------------------------------
+    // GST-correct treatment: a coupon applied at the time of supply is an
+    // "invoice discount" under CGST Act §15(3)(a) — it reduces each line's
+    // taxable value, and GST is computed on the discounted base. The seller's
+    // taxable supply is therefore the post-discount amount, which is also
+    // what commission + payout compute against.
+    let couponDiscount = 0;
+    let appliedCouponId: string | null = null;
+    let appliedCouponCode: string | null = null;
+    const perStoreDiscount = new Map<string, number>();
+    if (input.couponCode && input.couponCode.trim()) {
+      const cartLines = sellerOrderRows.flatMap((so, i) =>
+        lineMaths[i].map((m) => ({
+          storeId: so.storeId,
+          lineTotal: m.lineSubtotal,
+        })),
+      );
+      const result = await this.coupon.validateAndCompute({
+        code: input.couponCode,
+        customerId,
+        cartLines,
+      });
+      if (!result.isValid) {
+        throw new BadRequestException(result.reason);
+      }
+      couponDiscount = result.discountAmount;
+      appliedCouponId = result.coupon.id;
+      appliedCouponCode = result.coupon.code;
+      result.perStoreDiscount.forEach((v, k) => perStoreDiscount.set(k, v));
+    }
+
+    // ---- Step 4c: Per-line discount + tax-on-discounted-base ----------------
+    // For each seller-order: allocate the store's coupon discount across its
+    // lines proportionally to lineSubtotal. The last line eats any rounding
+    // drift so the sum ties exactly to the store's allotment.
+    let parentSubtotal = 0;
+    let parentTax = 0;
+    let parentDiscount = 0;
+
+    for (let i = 0; i < sellerOrderRows.length; i++) {
+      const so = sellerOrderRows[i];
+      const items = so.items;
+      const maths = lineMaths[i];
+      const storeDiscount = perStoreDiscount.get(so.storeId) ?? 0;
+
+      let allocated = 0;
+      for (let j = 0; j < items.length; j++) {
+        const m = maths[j];
+        const it = items[j];
+        let lineDiscount: number;
+        if (j === items.length - 1) {
+          lineDiscount = round2(storeDiscount - allocated);
+        } else if (so.subtotal > 0) {
+          lineDiscount = round2((storeDiscount * m.lineSubtotal) / so.subtotal);
+          allocated += lineDiscount;
+        } else {
+          lineDiscount = 0;
+        }
+        const taxableValue = Math.max(0, m.lineSubtotal - lineDiscount);
+        const lineTax = round2((taxableValue * it.taxRate) / 100);
+
+        m.lineDiscount = lineDiscount;
+        m.lineTax = lineTax;
+      }
+
+      const soTax = maths.reduce((s, m) => s + m.lineTax, 0);
+      const soTaxableValue = so.subtotal - storeDiscount;
+      // Commission on the taxable (post-discount) value — matches the
+      // seller's actual GST-recognised revenue and is the typical contract
+      // term for Indian marketplaces.
+      const commissionAmount = round2((soTaxableValue * so.commissionRate) / 100);
+      // Payout = taxable value + GST collected on that value − commission.
+      // The customer pays exactly this to the platform; platform pays the
+      // commission to itself and forwards the rest to the seller.
+      const payoutAmount = round2(soTaxableValue + soTax - commissionAmount);
+
+      so.taxAmount = round2(soTax);
+      so.discountAmount = round2(storeDiscount);
+      so.commissionAmount = commissionAmount;
+      so.payoutAmount = payoutAmount;
+
+      parentSubtotal += so.subtotal;
+      parentTax += so.taxAmount;
+      parentDiscount += so.discountAmount;
+    }
+
+    const totalAmount = round2(parentSubtotal + parentTax - parentDiscount);
+    couponDiscount = round2(parentDiscount); // tie out exactly to per-store sum
 
     // ---- Step 5: One transaction commits everything ------------------------
     await this.prisma.$transaction(async (tx) => {
@@ -309,17 +405,33 @@ export class OrderPlacementService {
           subtotal: round2(parentSubtotal),
           taxAmount: round2(parentTax),
           shippingAmount: 0,
-          discountAmount: 0,
+          discountAmount: round2(couponDiscount),
           totalAmount: round2(totalAmount),
           currencyCode: 'INR',
+          couponId: appliedCouponId,
+          couponCode: appliedCouponCode,
           shippingAddressId: shippingAddress.id,
           billingAddressId: billingAddress.id,
           customerNotes: input.customerNotes ?? null,
         },
       });
 
+      // (a.1) Coupon redemption row — unique on orderId, guarantees idempotency.
+      if (appliedCouponId) {
+        await tx.couponRedemption.create({
+          data: {
+            couponId: appliedCouponId,
+            orderId,
+            customerId,
+            discountAmount: round2(couponDiscount),
+          },
+        });
+      }
+
       // (b) SellerOrders + (c) OrderItems + (d) status history
-      for (const so of sellerOrderRows) {
+      for (let i = 0; i < sellerOrderRows.length; i++) {
+        const so = sellerOrderRows[i];
+        const maths = lineMaths[i];
         await tx.sellerOrder.create({
           data: {
             id: so.id,
@@ -331,15 +443,16 @@ export class OrderPlacementService {
             paymentStatus,
             subtotal: so.subtotal,
             taxAmount: so.taxAmount,
+            discountAmount: so.discountAmount,
             commissionAmount: so.commissionAmount,
             payoutAmount: so.payoutAmount,
             currencyCode: 'INR',
           },
         });
 
-        for (const it of so.items) {
-          const lineSubtotal = it.unitPrice * it.quantity;
-          const lineTax = (lineSubtotal * it.taxRate) / 100;
+        for (let j = 0; j < so.items.length; j++) {
+          const it = so.items[j];
+          const m = maths[j];
           await tx.orderItem.create({
             data: {
               orderId,
@@ -352,9 +465,12 @@ export class OrderPlacementService {
               variantName: it.variantName,
               quantity: it.quantity,
               unitPrice: it.unitPrice,
-              totalPrice: round2(lineSubtotal),
-              taxAmount: round2(lineTax),
-              discountAmount: 0,
+              // totalPrice = gross line value (pre-discount). Matches Order.subtotal contribution.
+              totalPrice: round2(m.lineSubtotal),
+              // GST on the discounted taxable value, per CGST Act §15(3)(a).
+              taxAmount: m.lineTax,
+              // Coupon's allocated share for this line (0 when no coupon).
+              discountAmount: m.lineDiscount,
               attributesSnapshot: it.attributesSnapshot as unknown as Prisma.InputJsonValue,
               imageUrlSnapshot: it.imageUrlSnapshot,
             },

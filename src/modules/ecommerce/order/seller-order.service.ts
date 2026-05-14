@@ -182,6 +182,64 @@ export class SellerOrderService {
         }
       }
 
+      // Shipment commit: stock physically leaves the warehouse. Decrement
+      // quantityOnHand AND quantityReserved by the same amount; leave
+      // quantityAvailable alone (it was already debited at placement, when
+      // the reservation moved available → reserved).
+      //
+      // We scope by warehouseId belonging to THIS seller's store, not just
+      // by variantId, so a parent order that contains the same variant from
+      // a different seller does not get its stock committed here.
+      if (input.status === OrderStatus.SHIPPED) {
+        const items = await tx.orderItem.findMany({
+          where: { sellerOrderId: existing.id },
+          select: { variantId: true },
+        });
+        const variantIds = items.map((i) => i.variantId);
+
+        const movements = await tx.inventoryMovement.findMany({
+          where: {
+            referenceType: 'order',
+            referenceId: existing.orderId,
+            variantId: { in: variantIds },
+            warehouse: { storeId: existing.storeId },
+          },
+        });
+
+        for (const m of movements) {
+          const shipQty = Math.abs(m.quantityChange);
+          const before = await tx.inventory.findUnique({
+            where: { id: m.inventoryId },
+            select: { quantityOnHand: true },
+          });
+          if (!before) continue;
+
+          const inv = await tx.inventory.update({
+            where: { id: m.inventoryId },
+            data: {
+              quantityOnHand: { decrement: shipQty },
+              quantityReserved: { decrement: shipQty },
+              // quantityAvailable: untouched on purpose.
+            },
+          });
+          await tx.inventoryMovement.create({
+            data: {
+              inventoryId: m.inventoryId,
+              variantId: m.variantId,
+              warehouseId: m.warehouseId,
+              movementType: 'sale',
+              quantityChange: -shipQty,
+              quantityBefore: before.quantityOnHand,
+              quantityAfter: inv.quantityOnHand,
+              referenceType: 'order_ship',
+              referenceId: existing.id,
+              createdById: userId,
+              notes: `Shipped ${existing.orderNumber}`,
+            },
+          });
+        }
+      }
+
       // Cancellation in this path: seller-driven on a still-PENDING or
       // CONFIRMED sub-order. Release the reserved inventory for THIS
       // sub-order's items only (cancelling one seller's slice doesn't
@@ -196,6 +254,10 @@ export class SellerOrderService {
             referenceType: 'order',
             referenceId: existing.orderId,
             variantId: { in: items.map((i) => i.variantId) },
+            // Same defensive scope as the SHIPPED branch — don't restore
+            // stock that belongs to a different seller selling the same
+            // variant from a different warehouse.
+            warehouse: { storeId: existing.storeId },
           },
         });
         for (const m of movements) {

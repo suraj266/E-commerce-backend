@@ -37,8 +37,9 @@ model Customer {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  wishlists Wishlist[]
-  cart      Cart?
-  orders    Order[]
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wishlists       Wishlist[]
+  cart            Cart?
+  orders          Order[]
+  couponRedemptions CouponRedemption[]
 }

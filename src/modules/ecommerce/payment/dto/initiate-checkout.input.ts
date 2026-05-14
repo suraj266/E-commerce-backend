@@ -26,4 +26,11 @@ export class InitiateCheckoutInput {
   @IsString()
   @MaxLength(500)
   customerNotes?: string;
+
+  /** Optional — coupon code applied at cart, re-validated server-side. */
+  @Field(() => String, { nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  couponCode?: string;
 }

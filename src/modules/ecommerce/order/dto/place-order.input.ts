@@ -38,4 +38,11 @@ export class PlaceOrderInput {
   @IsString()
   @MaxLength(500)
   customerNotes?: string;
+
+  /** Optional — coupon code typed at cart/checkout. Re-validated server-side. */
+  @Field(() => String, { nullable: true })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  couponCode?: string;
 }
