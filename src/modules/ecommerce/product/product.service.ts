@@ -705,6 +705,14 @@ export class ProductService {
     sort?: ProductSortOrder;
     page?: number;
     pageSize?: number;
+    /**
+     * Free-text search. Case-insensitive substring match across the product's
+     * own name + short description AND the joined brand name. v1 uses ILIKE
+     * — good enough for typical catalog sizes. v2 should switch to a
+     * `tsvector` column with weighted ranking when catalogs grow past ~50k
+     * products. See SEARCH.md (TODO).
+     */
+    search?: string;
   }) {
     const page = Math.max(1, filter.page ?? 1);
     const pageSize = Math.min(Math.max(filter.pageSize ?? 12, 1), 60);
@@ -727,6 +735,31 @@ export class ProductService {
       ? await this.buildCategoryDescendantFilter(filter.categorySlug)
       : null;
 
+    // Free-text — only kicks in when the query is non-empty after trim.
+    // Joined with OR across name / shortDescription / brand name so a search
+    // for "samsung" finds both products named "Samsung Galaxy S24" AND
+    // products whose brand is "Samsung". Wrapped in an AND with the other
+    // filters so the existing facets still narrow the result set.
+    const searchTrimmed = (filter.search ?? '').trim();
+    const searchFilter: Prisma.ProductWhereInput | null = searchTrimmed
+      ? {
+          OR: [
+            { name: { contains: searchTrimmed, mode: 'insensitive' } },
+            {
+              shortDescription: {
+                contains: searchTrimmed,
+                mode: 'insensitive',
+              },
+            },
+            {
+              brand: {
+                name: { contains: searchTrimmed, mode: 'insensitive' },
+              },
+            },
+          ],
+        }
+      : null;
+
     const where: Prisma.ProductWhereInput = {
       deletedAt: null,
       status: ProductStatus.ACTIVE,
@@ -738,6 +771,7 @@ export class ProductService {
       ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
       ...(filter.tagSlug ? { tags: { some: { slug: filter.tagSlug } } } : {}),
       ...(hasPriceFilter ? { variants: { some: priceVariantFilter } } : {}),
+      ...(searchFilter ? { AND: [searchFilter] } : {}),
     };
 
     // Order determines how we slice.
@@ -765,6 +799,89 @@ export class ProductService {
       totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
       currentPage: page,
       pageSize,
+    };
+  }
+
+  /**
+   * Header search autocomplete. Returns up to `limit` (max 10) lightweight
+   * product rows matching the term. Same ILIKE shape as the paginated query
+   * but returns only the fields the dropdown actually renders, keeping
+   * per-keystroke latency low.
+   *
+   * Returns BOTH category and product matches so the dropdown can offer
+   * a fast jump-to-category alongside individual products. Categories
+   * surface first in the response (the frontend renders them as a small
+   * section above products).
+   */
+  async searchSuggestions(args: { q: string; limit?: number }) {
+    const term = (args.q ?? '').trim();
+    if (term.length < 2) {
+      return { categories: [], products: [] };
+    }
+    const productTake = Math.min(Math.max(args.limit ?? 8, 1), 10);
+    const categoryTake = 3; // never more than 3, the dropdown is real-estate-constrained
+
+    // Fire category + product queries in parallel — they're independent.
+    const [categoryRows, productRows] = await Promise.all([
+      this.prisma.category.findMany({
+        where: {
+          deletedAt: null,
+          isActive: true,
+          name: { contains: term, mode: 'insensitive' },
+        },
+        include: {
+          _count: {
+            select: {
+              products: {
+                where: { deletedAt: null, status: ProductStatus.ACTIVE },
+              },
+            },
+          },
+        },
+        // Categories with more products surface first — feels more useful
+        // than alphabetical when the customer is exploring.
+        orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+        take: categoryTake,
+      }),
+      this.prisma.product.findMany({
+        where: {
+          deletedAt: null,
+          status: ProductStatus.ACTIVE,
+          store: { status: 'ACTIVE', deletedAt: null },
+          OR: [
+            { name: { contains: term, mode: 'insensitive' } },
+            { brand: { name: { contains: term, mode: 'insensitive' } } },
+          ],
+        },
+        include: {
+          brand: { select: { name: true } },
+          images: { orderBy: { displayOrder: 'asc' as const }, take: 1 },
+          variants: {
+            where: { deletedAt: null },
+            orderBy: { price: 'asc' as const },
+            take: 1,
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: productTake,
+      }),
+    ]);
+
+    return {
+      categories: categoryRows.map((c) => ({
+        id: c.id,
+        name: c.name,
+        slug: c.slug,
+        productCount: c._count.products,
+      })),
+      products: productRows.map((p) => ({
+        id: p.id,
+        name: p.name,
+        slug: p.slug,
+        price: p.variants[0] ? Number(p.variants[0].price) : 0,
+        imageUrl: p.images[0]?.imageUrl ?? null,
+        brandName: p.brand?.name ?? null,
+      })),
     };
   }
 

@@ -48,7 +48,14 @@ export class CouponCustomerResolver {
         items: {
           include: {
             variant: { select: { price: true } },
-            product: { select: { storeId: true } },
+            product: {
+              select: {
+                storeId: true,
+                // Needed so the validation can compute the customer-facing
+                // tax-inclusive total + GST reduction from the discount.
+                tax: { select: { rate: true } },
+              },
+            },
           },
         },
       },
@@ -60,12 +67,16 @@ export class CouponCustomerResolver {
         coupon: null,
         discountAmount: 0,
         subtotal: 0,
+        subtotalInclTax: 0,
+        discountInclTax: 0,
+        customerTotal: 0,
       };
     }
 
     const cartLines = cart.items.map((it) => ({
       storeId: it.product.storeId,
       lineTotal: Number(it.variant.price) * it.quantity,
+      taxRate: it.product.tax?.rate != null ? Number(it.product.tax.rate) : null,
     }));
 
     const result = await this.service.validateAndCompute({
@@ -81,6 +92,9 @@ export class CouponCustomerResolver {
         coupon: this.serializeCoupon(result.coupon),
         discountAmount: result.discountAmount,
         subtotal: result.subtotal,
+        subtotalInclTax: result.subtotalInclTax,
+        discountInclTax: result.discountInclTax,
+        customerTotal: result.customerTotal,
       };
     }
     return {
@@ -89,6 +103,9 @@ export class CouponCustomerResolver {
       coupon: null,
       discountAmount: 0,
       subtotal: result.subtotal,
+      subtotalInclTax: result.subtotalInclTax,
+      discountInclTax: 0,
+      customerTotal: result.customerTotal,
     };
   }
 

@@ -16,7 +16,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install
 
 COPY prisma ./prisma/
-RUN npx prisma generate
+RUN pnpm exec prisma generate
 
 COPY . .
 
@@ -39,7 +39,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod
 
 COPY prisma ./prisma/
-RUN npx prisma generate
+RUN pnpm exec prisma generate
 
 COPY --from=builder /app/dist ./dist
 

@@ -108,6 +108,9 @@ const permissions = [
     { module: "coupon", action: "create", description: "Create coupon" },
     { module: "coupon", action: "update", description: "Update coupon" },
     { module: "coupon", action: "delete", description: "Soft-delete coupon" },
+    // Reviews
+    { module: "review", action: "read", description: "Read all reviews including pending/hidden (admin moderation)" },
+    { module: "review", action: "moderate", description: "Approve or reject pending reviews" },
 ]
 
 async function main() {

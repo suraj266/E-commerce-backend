@@ -107,6 +107,7 @@ model Order {
   statusHistory   OrderStatusHistory[]
   payments        Payment[]
   couponRedemption CouponRedemption?
+  reviews          Review[]
 
   @@index([customerId])
   @@index([status])

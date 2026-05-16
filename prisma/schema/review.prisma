@@ -1,0 +1,63 @@
+/// Product reviews — customer-submitted rating + free-text feedback.
+///
+/// v1 scope:
+///   - One review per (productId, customerId) pair. Enforced by unique index.
+///   - Only customers who have a `DELIVERED` order containing the product
+///     can write a review. Backend re-checks at every write — never trust the
+///     client's "canReview" hint. The `orderId` snapshot records WHICH
+///     delivered order made the review verified, so a future refund or
+///     status reversal can be audited.
+///   - rating is 1..5 (validated in the DTO).
+///   - status: PUBLISHED on create; admin can flip to HIDDEN to remove from
+///     the public list without deleting the row (preserves the customer's
+///     write so they can't just submit it again).
+///
+/// v2 (intentionally not in v1):
+///   - Photo / video attachments
+///   - "Helpful" votes
+///   - Seller replies (would need a separate ReviewReply table)
+///   - Buyer-only flag (vs. verified-purchase) for non-customer testers
+
+enum ReviewStatus {
+  PUBLISHED
+  HIDDEN
+  /// Reserved — used when we wire moderation queues. For v1, all reviews
+  /// auto-publish so this state never appears in practice yet.
+  PENDING
+}
+
+model Review {
+  id         String       @id @default(uuid())
+  productId  String
+  customerId String
+  /// Snapshot of which delivered order qualified this customer to write the
+  /// review. Used to display "Verified purchase" + the audit trail when
+  /// refund/return flows mature.
+  orderId    String
+
+  /// 1..5 inclusive.
+  rating Int
+  /// Optional one-line summary; the body is required.
+  title  String?
+  body   String
+
+  status       ReviewStatus @default(PUBLISHED)
+  /// When hidden — who did it, why, when. Admin tooling fills these.
+  hiddenReason String?
+  hiddenById   String?
+  hiddenAt     DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  product  Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customer Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  order    Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  media    ReviewMedia[]
+
+  @@unique([productId, customerId])
+  @@index([productId, status])
+  @@index([customerId])
+  @@index([createdAt])
+}

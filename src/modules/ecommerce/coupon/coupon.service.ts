@@ -32,8 +32,15 @@ import { UpdateCouponInput } from './dto/update-coupon.input';
 
 export interface CartLineForValidation {
   storeId: string;
-  /** Line total = unitPrice * quantity, post any line-level discounts. */
+  /** Line total = unitPrice * quantity, pre-tax + pre-discount. */
   lineTotal: number;
+  /**
+   * GST rate as a percentage (e.g. 18 for 18% GST). 0 / null when the product
+   * has no tax linked. Used to compute the customer-facing "what they actually
+   * pay" total — discount lands on the line, GST recomputes on the discounted
+   * taxable value per CGST Act §15(3)(a).
+   */
+  taxRate?: number | null;
 }
 
 export interface ValidateAndComputeArgs {
@@ -47,10 +54,23 @@ export interface ValidateAndComputeSuccess {
   isValid: true;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   coupon: any;
-  /** Total discount applied to the cart. */
+  /** Pre-tax discount (e.g. 10% × ₹100 subtotal = ₹10). */
   discountAmount: number;
-  /** Subtotal we computed the discount against. */
+  /** Pre-tax subtotal we computed the discount against. */
   subtotal: number;
+  /** Tax-inclusive subtotal — sum of lineTotal × (1 + taxRate/100), pre-discount. */
+  subtotalInclTax: number;
+  /**
+   * Effective discount on the tax-inclusive price (= subtotalInclTax − customerTotal).
+   * For a single-rate cart this is `discountAmount × (1 + r)`; for mixed rates
+   * it's the weighted sum across lines.
+   */
+  discountInclTax: number;
+  /**
+   * Final amount the customer pays at checkout. Equals what the order
+   * placement transaction will write to Order.totalAmount.
+   */
+  customerTotal: number;
   /** storeId → allocated discount. Sum equals discountAmount (within ±1 paisa). */
   perStoreDiscount: Map<string, number>;
 }
@@ -60,6 +80,9 @@ export interface ValidateAndComputeFailure {
   reason: string;
   discountAmount: 0;
   subtotal: number;
+  subtotalInclTax: number;
+  discountInclTax: 0;
+  customerTotal: number;
 }
 
 export type ValidateAndComputeResult =
@@ -237,12 +260,18 @@ export class CouponService {
     const subtotal = round2(
       args.cartLines.reduce((s, l) => s + l.lineTotal, 0),
     );
+    const subtotalInclTax = round2(
+      args.cartLines.reduce(
+        (s, l) => s + l.lineTotal * (1 + (Number(l.taxRate ?? 0) || 0) / 100),
+        0,
+      ),
+    );
 
     if (!codeUpper) {
-      return invalid('Enter a coupon code to continue.', subtotal);
+      return invalid('Enter a coupon code to continue.', subtotal, subtotalInclTax);
     }
     if (args.cartLines.length === 0) {
-      return invalid('Your cart is empty.', 0);
+      return invalid('Your cart is empty.', 0, 0);
     }
 
     const coupon = await this.prisma.coupon.findUnique({
@@ -250,19 +279,19 @@ export class CouponService {
     });
 
     if (!coupon || coupon.deletedAt) {
-      return invalid('This coupon code is invalid.', subtotal);
+      return invalid('This coupon code is invalid.', subtotal, subtotalInclTax);
     }
     if (!coupon.isActive) {
-      return invalid('This coupon is no longer active.', subtotal);
+      return invalid('This coupon is no longer active.', subtotal, subtotalInclTax);
     }
     if (coupon.validFrom > now) {
       return invalid(
         `This coupon is not active yet. Try again on ${coupon.validFrom.toLocaleDateString()}.`,
-        subtotal,
+        subtotal, subtotalInclTax,
       );
     }
     if (coupon.validUntil < now) {
-      return invalid('This coupon has expired.', subtotal);
+      return invalid('This coupon has expired.', subtotal, subtotalInclTax);
     }
 
     // Scope: if storeId is set, every cart line must be from that store.
@@ -273,43 +302,41 @@ export class CouponService {
       if (offending) {
         return invalid(
           'This coupon applies to a specific store. Some items in your cart are not eligible.',
-          subtotal,
+          subtotal, subtotalInclTax,
         );
       }
     }
 
-    // Min purchase
-    if (
-      coupon.minimumPurchaseAmount != null &&
-      subtotal < Number(coupon.minimumPurchaseAmount)
-    ) {
-      const min = Number(coupon.minimumPurchaseAmount);
+    // Min purchase — 0 and null both mean "no minimum"
+    const minPurchase = Number(coupon.minimumPurchaseAmount ?? 0);
+    if (minPurchase > 0 && subtotal < minPurchase) {
       return invalid(
-        `Add ₹${(min - subtotal).toFixed(0)} more to use this coupon (₹${min.toFixed(0)} minimum).`,
-        subtotal,
+        `Add ₹${(minPurchase - subtotal).toFixed(0)} more to use this coupon (₹${minPurchase.toFixed(0)} minimum).`,
+        subtotal, subtotalInclTax,
       );
     }
 
-    // Usage limits — count redemptions
-    if (coupon.usageLimit != null) {
+    // Usage limits — 0 OR null mean unlimited. A literal "0 uses" coupon
+    // could never be redeemed; treat that data entry as "no limit set".
+    if (coupon.usageLimit != null && coupon.usageLimit > 0) {
       const totalUsed = await this.prisma.couponRedemption.count({
         where: { couponId: coupon.id },
       });
       if (totalUsed >= coupon.usageLimit) {
         return invalid(
           'This coupon has reached its usage limit.',
-          subtotal,
+          subtotal, subtotalInclTax,
         );
       }
     }
-    if (coupon.usageLimitPerUser != null) {
+    if (coupon.usageLimitPerUser != null && coupon.usageLimitPerUser > 0) {
       const perUserUsed = await this.prisma.couponRedemption.count({
         where: { couponId: coupon.id, customerId: args.customerId },
       });
       if (perUserUsed >= coupon.usageLimitPerUser) {
         return invalid(
           'You have already used this coupon the maximum number of times.',
-          subtotal,
+          subtotal, subtotalInclTax,
         );
       }
     }
@@ -318,11 +345,11 @@ export class CouponService {
     let discountAmount = 0;
     if (coupon.discountType === 'percentage') {
       discountAmount = subtotal * (Number(coupon.discountValue) / 100);
-      if (coupon.maximumDiscountAmount != null) {
-        discountAmount = Math.min(
-          discountAmount,
-          Number(coupon.maximumDiscountAmount),
-        );
+      // 0 OR null = no cap. A literal "cap at zero" would be useless and is
+      // almost always a "user meant unlimited" data-entry mistake.
+      const maxCap = Number(coupon.maximumDiscountAmount ?? 0);
+      if (maxCap > 0) {
+        discountAmount = Math.min(discountAmount, maxCap);
       }
     } else if (coupon.discountType === 'fixed_amount') {
       discountAmount = Math.min(Number(coupon.discountValue), subtotal);
@@ -330,14 +357,14 @@ export class CouponService {
       this.logger.error(
         `Unknown discountType "${coupon.discountType}" on coupon ${coupon.code}`,
       );
-      return invalid('This coupon is misconfigured.', subtotal);
+      return invalid('This coupon is misconfigured.', subtotal, subtotalInclTax);
     }
 
     discountAmount = round2(discountAmount);
     if (discountAmount <= 0) {
       return invalid(
         "Looks like this coupon wouldn't apply any discount to your cart.",
-        subtotal,
+        subtotal, subtotalInclTax,
       );
     }
 
@@ -366,11 +393,50 @@ export class CouponService {
       perStoreDiscount.set(sid, share);
     }
 
+    // ---- Customer-facing tax math ----
+    // For each line: lineDiscount allocated proportionally inside its store,
+    // then customer pays (lineSubtotal - lineDiscount) * (1 + r/100).
+    // Mirrors what OrderPlacementService computes at placement time.
+    let customerTotal = 0;
+    const perStoreAllocated = new Map<string, number>();
+    for (const sid of storeIds) perStoreAllocated.set(sid, 0);
+    for (let li = 0; li < args.cartLines.length; li++) {
+      const l = args.cartLines[li];
+      const storeSub = perStoreSubtotal.get(l.storeId)!;
+      const storeAllot = perStoreDiscount.get(l.storeId) ?? 0;
+      const isLastLineInStore = !args.cartLines
+        .slice(li + 1)
+        .some((next) => next.storeId === l.storeId);
+      let lineDiscount: number;
+      if (isLastLineInStore) {
+        lineDiscount = round2(
+          storeAllot - (perStoreAllocated.get(l.storeId) ?? 0),
+        );
+      } else if (storeSub > 0) {
+        lineDiscount = round2((storeAllot * l.lineTotal) / storeSub);
+        perStoreAllocated.set(
+          l.storeId,
+          (perStoreAllocated.get(l.storeId) ?? 0) + lineDiscount,
+        );
+      } else {
+        lineDiscount = 0;
+      }
+      const taxRate = Number(l.taxRate ?? 0) || 0;
+      const taxableValue = Math.max(0, l.lineTotal - lineDiscount);
+      const lineTax = (taxableValue * taxRate) / 100;
+      customerTotal += taxableValue + lineTax;
+    }
+    customerTotal = round2(customerTotal);
+    const discountInclTax = round2(subtotalInclTax - customerTotal);
+
     return {
       isValid: true,
       coupon,
       discountAmount,
       subtotal,
+      subtotalInclTax,
+      discountInclTax,
+      customerTotal,
       perStoreDiscount,
     };
   }
@@ -411,6 +477,24 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-function invalid(reason: string, subtotal: number): ValidateAndComputeFailure {
-  return { isValid: false, reason, discountAmount: 0, subtotal };
+/**
+ * Failure result. `subtotalInclTax` defaults to `subtotal` for "no-cart" or
+ * "no-tax-known" callsites; pass an explicit tax-inclusive subtotal when one
+ * has been computed so the UI can still render the correct grand total.
+ */
+function invalid(
+  reason: string,
+  subtotal: number,
+  subtotalInclTax?: number,
+): ValidateAndComputeFailure {
+  const incl = subtotalInclTax ?? subtotal;
+  return {
+    isValid: false,
+    reason,
+    discountAmount: 0,
+    subtotal,
+    subtotalInclTax: incl,
+    discountInclTax: 0,
+    customerTotal: incl,
+  };
 }

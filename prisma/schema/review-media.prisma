@@ -1,0 +1,41 @@
+/// Media attachments on a customer review (photos + short clips).
+///
+/// v1:
+///   - Images: server-side compressed via sharp on upload (≤1080px long
+///     edge, webp). Max 5 per review.
+///   - Videos: max 1 per review, 50MB / 60s cap, no transcoding (raw mp4
+///     served back as-is). v2 can add a background ffmpeg job to normalise
+///     codec + produce a poster frame.
+///
+/// `url` is a server-relative path (`/media/review/<id>`) — the resolver
+/// rewrites to absolute via FRONTEND/BACKEND base URL if the storage
+/// provider returns external URLs (e.g. S3). `thumbnailUrl` is set for
+/// videos to a poster frame later; null for images (the image itself is
+/// thumbnailable on-the-fly).
+
+enum ReviewMediaType {
+  IMAGE
+  VIDEO
+}
+
+model ReviewMedia {
+  id           String          @id @default(uuid())
+  reviewId     String
+  type         ReviewMediaType
+  url          String
+  thumbnailUrl String?
+  /// Pixel dimensions; null for video until poster generation lands.
+  width        Int?
+  height       Int?
+  /// Video duration in milliseconds. Null for images.
+  durationMs   Int?
+  /// File size in bytes (after compression for images).
+  sizeBytes    Int
+  /// Order in the gallery. Set client-side based on pick sequence.
+  displayOrder Int             @default(0)
+  createdAt    DateTime        @default(now())
+
+  review Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  @@index([reviewId])
+}

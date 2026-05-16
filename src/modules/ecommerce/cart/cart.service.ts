@@ -106,31 +106,47 @@ export class CartService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private hydrateProduct(p: any) {
     if (!p) return null;
+    // Tax rate drives priceWithTax on both the product and every variant so
+    // the storefront can render tax-inclusive prices when the site setting
+    // demands it. Without this, cart shows the pre-tax price even when
+    // `show_price_with_tax = true`.
+    const taxRate = p.tax?.rate != null ? Number(p.tax.rate) : null;
+    const withTax = (price: number): number | null =>
+      taxRate != null
+        ? Math.round((price + (price * taxRate) / 100) * 100) / 100
+        : null;
+
     const variants = p.variants ?? [];
     const defaultVariant = variants[0];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const formattedVariants = variants.map((v: any) => ({
-      ...v,
-      price: Number(v.price),
-      compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
-      costPrice: v.costPrice != null ? Number(v.costPrice) : null,
-      weight: v.weight != null ? Number(v.weight) : null,
-      length: v.length != null ? Number(v.length) : null,
-      width: v.width != null ? Number(v.width) : null,
-      height: v.height != null ? Number(v.height) : null,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      attributes: (v.attributes ?? []).map((a: any) => ({
-        attributeId: a.attributeId,
-        attributeValueId: a.attributeValueId,
-        attributeName: a.attribute?.name ?? '',
-        attributeSlug: a.attribute?.slug ?? '',
-        value: a.attributeValue?.value ?? '',
-        valueSlug: a.attributeValue?.slug ?? '',
-      })),
-    }));
+    const formattedVariants = variants.map((v: any) => {
+      const vPrice = Number(v.price);
+      return {
+        ...v,
+        price: vPrice,
+        priceWithTax: withTax(vPrice),
+        compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
+        costPrice: v.costPrice != null ? Number(v.costPrice) : null,
+        weight: v.weight != null ? Number(v.weight) : null,
+        length: v.length != null ? Number(v.length) : null,
+        width: v.width != null ? Number(v.width) : null,
+        height: v.height != null ? Number(v.height) : null,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        attributes: (v.attributes ?? []).map((a: any) => ({
+          attributeId: a.attributeId,
+          attributeValueId: a.attributeValueId,
+          attributeName: a.attribute?.name ?? '',
+          attributeSlug: a.attribute?.slug ?? '',
+          value: a.attributeValue?.value ?? '',
+          valueSlug: a.attributeValue?.slug ?? '',
+        })),
+      };
+    });
+    const price = defaultVariant ? Number(defaultVariant.price) : 0;
     return {
       ...p,
-      price: defaultVariant ? Number(defaultVariant.price) : 0,
+      price,
+      priceWithTax: withTax(price),
       compareAtPrice: defaultVariant?.compareAtPrice
         ? Number(defaultVariant.compareAtPrice)
         : null,
@@ -193,6 +209,19 @@ export class CartService {
           valueSlug: a.attributeValue?.slug ?? '',
         }));
 
+        // The variant ships with the cart row independently of the product
+        // include path, so we have to recompute priceWithTax here using the
+        // product's tax rate. Without this, item.variant.priceWithTax is
+        // null and the storefront falls back to the pre-tax price.
+        const taxRate =
+          it.product?.tax?.rate != null
+            ? Number(it.product.tax.rate)
+            : null;
+        const variantPriceWithTax =
+          taxRate != null
+            ? Math.round((unitPriceCurrent + (unitPriceCurrent * taxRate) / 100) * 100) / 100
+            : null;
+
         return {
           ...it,
           unitPriceSnapshot,
@@ -205,6 +234,7 @@ export class CartService {
             ? {
                 ...it.variant,
                 price: unitPriceCurrent,
+                priceWithTax: variantPriceWithTax,
                 attributes: flattenedAttrs,
               }
             : null,

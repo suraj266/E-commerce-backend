@@ -1,6 +1,12 @@
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["prismaSchemaFolder"]
+  // Pin engine binaries so `prisma generate` inside the production Docker
+  // build resolves the same target every time, regardless of the build
+  // host's libssl auto-detection.
+  //   - native: dev (host OS — macOS / Win / linux-musl on local docker)
+  //   - debian-openssl-3.0.x: node:25-slim runtime (Debian Trixie + OpenSSL 3)
+  binaryTargets   = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {

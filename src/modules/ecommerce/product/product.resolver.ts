@@ -15,6 +15,7 @@ import {
   ProductVariant,
   VariantAxis,
 } from './entities/product-variant.entity';
+import { SearchSuggestions } from './entities/search-suggestion.entity';
 import { SetVariantAxesInput } from './dto/set-variant-axes.input';
 import { GenerateVariantMatrixInput } from './dto/generate-variant-matrix.input';
 import { CreateVariantInput } from './dto/create-variant.input';
@@ -218,6 +219,7 @@ export class ProductResolver {
     sort?: ProductSortOrder,
     @Args('page', { type: () => Int, nullable: true }) page?: number,
     @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+    @Args('search', { type: () => String, nullable: true }) search?: string,
   ) {
     return this.productService.findPaginatedPublicProducts({
       storeSlug,
@@ -229,7 +231,20 @@ export class ProductResolver {
       sort,
       page,
       pageSize,
+      search,
     });
+  }
+
+  /**
+   * Header autocomplete. Returns up to `limit` light-weight product rows
+   * matching the term. The full /search page uses paginatedPublicProducts.
+   */
+  @Query(() => SearchSuggestions, { name: 'searchSuggestions' })
+  searchSuggestions(
+    @Args('q', { type: () => String }) q: string,
+    @Args('limit', { type: () => Int, nullable: true }) limit?: number,
+  ) {
+    return this.productService.searchSuggestions({ q, limit });
   }
 
   // ---------------------------------------------------------------------------

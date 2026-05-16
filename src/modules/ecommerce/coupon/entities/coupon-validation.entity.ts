@@ -18,11 +18,30 @@ export class CouponValidation {
   @Field(() => Coupon, { nullable: true })
   coupon?: Coupon | null;
 
-  /** Discount in INR for the current cart subtotal. 0 when invalid. */
+  /** Pre-tax discount (e.g. 10% × ₹100 = ₹10). 0 when invalid. */
   @Field(() => Float)
   discountAmount: number;
 
-  /** Subtotal we computed the discount against (useful for UI sanity). */
+  /** Pre-tax cart subtotal. */
   @Field(() => Float)
   subtotal: number;
+
+  /** Tax-inclusive subtotal — what the cart displays when prices show tax. */
+  @Field(() => Float)
+  subtotalInclTax: number;
+
+  /**
+   * Effective discount on the tax-inclusive total (= subtotalInclTax − customerTotal).
+   * Larger than `discountAmount` when discount triggers a GST reduction
+   * on the discounted taxable value (CGST Act §15(3)(a)).
+   */
+  @Field(() => Float)
+  discountInclTax: number;
+
+  /**
+   * Final amount the customer pays at checkout, including GST computed on
+   * the post-discount taxable value. Matches Order.totalAmount at placement.
+   */
+  @Field(() => Float)
+  customerTotal: number;
 }

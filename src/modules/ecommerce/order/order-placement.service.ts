@@ -314,9 +314,10 @@ export class OrderPlacementService {
     const perStoreDiscount = new Map<string, number>();
     if (input.couponCode && input.couponCode.trim()) {
       const cartLines = sellerOrderRows.flatMap((so, i) =>
-        lineMaths[i].map((m) => ({
+        lineMaths[i].map((m, j) => ({
           storeId: so.storeId,
           lineTotal: m.lineSubtotal,
+          taxRate: so.items[j].taxRate,
         })),
       );
       const result = await this.coupon.validateAndCompute({

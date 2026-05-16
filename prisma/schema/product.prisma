@@ -80,6 +80,7 @@ model Product {
   wishlistItems WishlistItem[]
   cartItems     CartItem[]
   orderItems    OrderItem[]
+  reviews       Review[]
 
   @@index([storeId, status])
   @@index([brandId])

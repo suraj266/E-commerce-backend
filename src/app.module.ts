@@ -29,6 +29,7 @@ import { CartModule } from './modules/ecommerce/cart/cart.module';
 import { OrderModule } from './modules/ecommerce/order/order.module';
 import { PaymentModule } from './modules/ecommerce/payment/payment.module';
 import { CouponModule } from './modules/ecommerce/coupon/coupon.module';
+import { ReviewModule } from './modules/ecommerce/review/review.module';
 // CMS modules
 import { PageModule } from './modules/cms/page/page.module';
 import { MenuModule } from './modules/cms/menu/menu.module';
@@ -80,6 +81,7 @@ import { EmailModule } from './modules/admin/email/email.module';
     OrderModule,
     PaymentModule,
     CouponModule,
+    ReviewModule,
     // ---- CMS Modules ----
     PageModule,
     MenuModule,

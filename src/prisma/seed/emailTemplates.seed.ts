@@ -269,6 +269,53 @@ const templates = [
     isEnabled: true,
     isSystem: false,
   },
+  {
+    key: 'admin_new_review',
+    name: 'New review pending moderation',
+    description: 'Notifies admin when a customer submits a review for approval.',
+    category: 'ADMIN' as const,
+    subject: 'Review pending: {{productName}} ({{rating}}★)',
+    htmlBody: `<p>A new product review is waiting for moderation.</p>
+<p><strong>Product:</strong> {{productName}}<br/>
+<strong>Reviewer:</strong> {{customerName}}<br/>
+<strong>Rating:</strong> {{rating}} / 5</p>
+{{#if title}}<p><strong>Title:</strong> {{title}}</p>{{/if}}
+<blockquote style="margin:16px 0;padding:12px 16px;border-left:3px solid #e4e4e7;color:#52525b;">{{body}}</blockquote>
+<p style="margin:24px 0;"><a href="{{reviewLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">Open moderation queue</a></p>`,
+    variables: ['productName', 'customerName', 'rating', 'title', 'body', 'reviewLink', 'shopName'],
+    isEnabled: true,
+    isSystem: false,
+  },
+
+  // ---- Customer review lifecycle ----
+  {
+    key: 'review_approved',
+    name: 'Review approved',
+    description: 'Sent to the customer when an admin approves their review.',
+    category: 'AUTH' as const,
+    subject: 'Your review is live on {{productName}}',
+    htmlBody: `<h2 style="margin:0 0 16px;font-size:20px;">Thanks, {{customerName}}!</h2>
+<p>Your review of <strong>{{productName}}</strong> is now visible to other customers. Thank you for sharing your experience.</p>
+<p style="margin:24px 0;"><a href="{{productLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">See your review</a></p>`,
+    variables: ['customerName', 'productName', 'productLink', 'shopName'],
+    isEnabled: true,
+    isSystem: false,
+  },
+  {
+    key: 'review_rejected',
+    name: 'Review needs changes',
+    description: 'Sent to the customer when an admin rejects their review.',
+    category: 'AUTH' as const,
+    subject: 'Your review of {{productName}} needs changes',
+    htmlBody: `<h2 style="margin:0 0 16px;font-size:20px;">Hi {{customerName}},</h2>
+<p>We couldn't publish your review of <strong>{{productName}}</strong> as-is.</p>
+{{#if reason}}<p><strong>Reason:</strong> {{reason}}</p>{{/if}}
+<p>You're welcome to edit and resubmit — once you make changes, the updated review will go through the same approval flow.</p>
+<p style="margin:24px 0;"><a href="{{productLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">Edit your review</a></p>`,
+    variables: ['customerName', 'productName', 'reason', 'productLink', 'shopName'],
+    isEnabled: true,
+    isSystem: false,
+  },
 
   // ---- Newsletter ----
   {
