@@ -1,37 +1,43 @@
+version: '3.8'
+
 services:
-  # Database Container Setup
   db:
     image: postgres:15
-    container_name: ecommerce_db
-    restart: always # Agar crash hua toh automatically restart ho jayega
+    container_name: ecommerce_db_dev
+    restart: always 
     ports:
-      - "5432:5432" # Host mapping
+      - "5432:5432" 
     environment:
-      # POSTGRES variables tumhare .env jaise set karne hain
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - pgdata:/var/lib/postgresql/data # Data delete na ho uske liye volume
+      - pgdata_dev:/var/lib/postgresql/data 
 
-  # Backend Application Container Setup
   backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ecommerce_backend
+      target: builder  # DEV HIGHLIGHT: Production code ignore karke Builder stage layega
+    container_name: ecommerce_backend_dev
     restart: always
     ports:
       - "${PORT}:${PORT}"
     depends_on:
-      - db  # Bataata hai ki pehle 'db' start hona chahiye
+      - db
     env_file:
       - .env
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+    volumes:
+      # Local image provider writes master + variant-cache files here.
+      # Persisted across container restarts; ignored when IMAGE_PROVIDER=s3.
+      - uploads_dev:/app/uploads
+    
     command: >
-      sh -c "npx prisma migrate deploy && npx prisma db seed && node dist/main.js"
+      sh -c "npx prisma generate && npx prisma migrate deploy && npm run start:dev"
 
-# Database volume ko declare karna zaroori hai
+# Persistent volumes
 volumes:
-  pgdata:
+  pgdata_dev:
+  uploads_dev:
