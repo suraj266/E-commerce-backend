@@ -90,6 +90,7 @@ export class AuthController {
             sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',   // CSRF protection
             maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms`
             path: '/',        // Sirf /auth routes pe bhejega
+            domain: process.env.NODE_ENV === 'production' ? '.surajojha.com' : undefined
         });
 
         // Response mein sirf accessToken aur user data bhejo, refreshToken nahi
@@ -131,6 +132,7 @@ export class AuthController {
             sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
             maxAge: 7 * 24 * 60 * 60 * 1000,
             path: '/',
+            domain: process.env.NODE_ENV === 'production' ? '.surajojha.com' : undefined
         });
 
         return { accessToken: result.accessToken };
@@ -148,7 +150,7 @@ export class AuthController {
         const result = await this.authService.logout({ refreshToken }, req.user.userId);
 
         // Clear the cookie (path must match the path used in res.cookie)
-        res.clearCookie('refreshToken', { path: '/' });
+        res.clearCookie('refreshToken', { path: '/', domain: process.env.NODE_ENV === 'production' ? '.surajojha.com' : undefined });
 
         return result;
     }
