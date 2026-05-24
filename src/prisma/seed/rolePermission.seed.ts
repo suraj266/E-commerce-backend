@@ -22,12 +22,12 @@ const permissions = [
     { module: "category", action: "update", description: "Update category" },
     { module: "category", action: "delete", description: "Delete category" },
     // Product Management
-    { module: "product", action: "create", description: "Create product" },
+    { module: "product", action: "create", description: "Admin creates a Product under any store" },
     { module: "product", action: "read", description: "Read product" },
     { module: "product", action: "update", description: "Update product" },
     { module: "product", action: "delete", description: "Delete product" },
     // Seller Management
-    { module: "seller", action: "create", description: "Create seller" },
+    { module: "seller", action: "create", description: "Admin creates a Seller (with User) on behalf of someone" },
     { module: "seller", action: "read", description: "Read seller" },
     { module: "seller", action: "update", description: "Update seller" },
     { module: "seller", action: "delete", description: "Delete seller" },
@@ -38,6 +38,7 @@ const permissions = [
     { module: "payout", action: "update", description: "Update payout account" },
     { module: "payout", action: "delete", description: "Delete payout account" },
     // Store Management
+    { module: "store", action: "create", description: "Admin creates a Store under any seller" },
     { module: "store", action: "read", description: "Read any store (admin)" },
     { module: "store", action: "update", description: "Update or override any store (admin)" },
     { module: "store", action: "delete", description: "Delete any store (admin)" },
@@ -111,6 +112,8 @@ const permissions = [
     // Reviews
     { module: "review", action: "read", description: "Read all reviews including pending/hidden (admin moderation)" },
     { module: "review", action: "moderate", description: "Approve or reject pending reviews" },
+    // Admin Dashboard
+    { module: "dashboard", action: "read", description: "Read admin dashboard metrics (revenue, orders, users, sellers, recent orders)" },
 ]
 
 async function main() {

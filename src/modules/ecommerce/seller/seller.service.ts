@@ -10,6 +10,7 @@ import {
   Prisma,
   SellerStatus,
 } from '@prisma/client';
+import { hash } from 'argon2';
 import {
   SellerListItem,
   SellerListStatus,
@@ -17,6 +18,7 @@ import {
 import { PrismaService } from '@/prisma/prisma.service';
 import { CreateSellerInput } from './dto/create-seller.input';
 import { UpdateSellerInput } from './dto/update-seller.input';
+import { AdminCreateSellerInput } from './dto/admin-create-seller.input';
 import {
   SellerVerificationSection,
   SetSellerStatusInput,
@@ -41,14 +43,44 @@ export class SellerService {
   // ---------------------------------------------------------------------------
 
   async createSelf(userId: string, input: CreateSellerInput) {
-    const existing = await this.prisma.seller.findUnique({ where: { userId } });
+    return this.createSellerRecord(userId, input, { status: SellerStatus.DRAFT });
+  }
+
+  /**
+   * Owner-agnostic core: writes a Seller row for a given userId. Both
+   * `createSelf` (seller-self via JWT) and `adminCreate` (admin) call this.
+   *
+   * - `opts.status` controls overallStatus (DRAFT for self, VERIFIED for admin).
+   * - `opts.markAllVerifiedNow` sets all section verification timestamps to
+   *   now() so admin-created sellers skip the verification queue entirely.
+   * - `tx` lets the caller wrap this in a wider transaction (used by
+   *   adminCreate to create User + Seller atomically).
+   */
+  private async createSellerRecord(
+    userId: string,
+    input: CreateSellerInput,
+    opts: { status: SellerStatus; markAllVerifiedNow?: boolean },
+    tx?: Prisma.TransactionClient,
+  ) {
+    const client = tx ?? this.prisma;
+
+    const existing = await client.seller.findUnique({ where: { userId } });
     if (existing && !existing.deletedAt) {
-      throw new ConflictException('You already have a seller profile');
+      throw new ConflictException('This user already has a seller profile');
     }
     this.assertSignatoryRequired(input);
     this.assertSignatoryPanDistinct(input);
 
-    return this.prisma.seller.create({
+    const verifiedTimestamps = opts.markAllVerifiedNow
+      ? {
+          panVerifiedAt: new Date(),
+          gstinVerifiedAt: input.gstin ? new Date() : null,
+          bankVerifiedAt: new Date(),
+          documentsVerifiedAt: new Date(),
+        }
+      : {};
+
+    return client.seller.create({
       data: {
         userId,
         legalName: input.legalName,
@@ -65,9 +97,57 @@ export class SellerService {
         signatoryPan: input.signatoryPan?.toUpperCase(),
         signatoryDesignation: input.signatoryDesignation,
         commissionRate: input.commissionRate ?? 0,
-        overallStatus: SellerStatus.DRAFT,
+        overallStatus: opts.status,
+        ...verifiedTimestamps,
       },
       include: { payoutAccounts: { where: { deletedAt: null } } },
+    });
+  }
+
+  /**
+   * Admin: create a User (role=seller, pre-verified email) + Seller record
+   * atomically. The seller starts VERIFIED so they can immediately receive
+   * stores and products without going through the onboarding queue.
+   */
+  async adminCreate(input: AdminCreateSellerInput) {
+    const normalizedEmail = input.userEmail.toLowerCase();
+    const normalizedPhone = this.normalizePhone(input.userPhone);
+
+    const sellerRole = await this.prisma.role.findUnique({
+      where: { name: 'seller' },
+    });
+    if (!sellerRole) {
+      throw new BadRequestException('Seller role missing. Run prisma seed.');
+    }
+
+    const [emailExists, phoneExists] = await Promise.all([
+      this.prisma.user.findUnique({ where: { email: normalizedEmail } }),
+      this.prisma.user.findUnique({ where: { phone: normalizedPhone } }),
+    ]);
+    if (emailExists) throw new ConflictException('Email already registered');
+    if (phoneExists) throw new ConflictException('Phone already registered');
+
+    const passwordHash = await hash(input.userPassword);
+
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          name: input.userName,
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          password: passwordHash,
+          roleId: sellerRole.id,
+          status: 'active',
+          emailVerifiedAt: new Date(),
+        },
+      });
+
+      return this.createSellerRecord(
+        user.id,
+        input,
+        { status: SellerStatus.VERIFIED, markAllVerifiedNow: true },
+        tx,
+      );
     });
   }
 

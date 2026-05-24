@@ -7,6 +7,8 @@ import { ProductImage } from './entities/product-image.entity';
 import { CreateProductInput } from './dto/create-product.input';
 import { UpdateProductInput } from './dto/update-product.input';
 import { SetProductStatusInput } from './dto/set-product-status.input';
+import { AdminCreateProductInput } from './dto/admin-create-product.input';
+import { AdminUpdateProductInput } from './dto/admin-update-product.input';
 import { AddProductImageInput } from './dto/add-product-image.input';
 import { UpdateProductImageInput } from './dto/update-product-image.input';
 import { ReorderProductImagesInput } from './dto/reorder-product-images.input';
@@ -158,6 +160,20 @@ export class ProductResolver {
   @Query(() => Product, { name: 'adminProduct' })
   adminProduct(@Args('id', { type: () => ID }) id: string) {
     return this.productService.findOneById(id);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('product:create')
+  @Mutation(() => Product)
+  adminCreateProduct(@Args('input') input: AdminCreateProductInput) {
+    return this.productService.adminCreate(input);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('product:update')
+  @Mutation(() => Product)
+  adminUpdateProduct(@Args('input') input: AdminUpdateProductInput) {
+    return this.productService.adminUpdate(input);
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)

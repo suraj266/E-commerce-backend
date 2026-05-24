@@ -7,6 +7,7 @@ import { Warehouse } from './entities/warehouse.entity';
 import { CreateStoreInput } from './dto/create-store.input';
 import { UpdateStoreInput } from './dto/update-store.input';
 import { SetStoreStatusInput } from './dto/set-store-status.input';
+import { AdminCreateStoreInput } from './dto/admin-create-store.input';
 import { CreateWarehouseInput } from './dto/create-warehouse.input';
 import { UpdateWarehouseInput } from './dto/update-warehouse.input';
 import { JwtAuthGuard } from '@/modules/identity/auth/jwt-auth.guard';
@@ -93,6 +94,20 @@ export class StoreResolver {
   @Query(() => Store, { name: 'store' })
   findOne(@Args('id', { type: () => ID }) id: string) {
     return this.storeService.findOne(id);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('store:create')
+  @Mutation(() => Store)
+  adminCreateStore(@Args('input') input: AdminCreateStoreInput) {
+    return this.storeService.adminCreate(input);
+  }
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('store:update')
+  @Mutation(() => Store)
+  adminUpdateStore(@Args('input') input: UpdateStoreInput) {
+    return this.storeService.adminUpdate(input);
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)

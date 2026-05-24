@@ -9,6 +9,8 @@ import { PrismaService } from '@/prisma/prisma.service';
 import { CreateProductInput } from './dto/create-product.input';
 import { UpdateProductInput } from './dto/update-product.input';
 import { SetProductStatusInput } from './dto/set-product-status.input';
+import { AdminCreateProductInput } from './dto/admin-create-product.input';
+import { AdminUpdateProductInput } from './dto/admin-update-product.input';
 import { AddProductImageInput } from './dto/add-product-image.input';
 import { UpdateProductImageInput } from './dto/update-product-image.input';
 import { ReorderProductImagesInput } from './dto/reorder-product-images.input';
@@ -273,12 +275,27 @@ export class ProductService {
 
   async createMyProduct(userId: string, input: CreateProductInput) {
     const { store } = await this.assertStoreOwnership(userId, input.storeId);
+    return this.createProductForStore(store, input);
+  }
+
+  /**
+   * Owner-agnostic core: writes a Product (+ default variant for SIMPLE) for
+   * the given store. Both `createMyProduct` (seller-self, ownership-checked)
+   * and `adminCreate` (admin, store-validated) call this.
+   *
+   * `opts.status` controls initial status — DRAFT for seller-self, admin can
+   * pass ACTIVE to publish immediately.
+   */
+  private async createProductForStore(
+    store: { id: string; currencyCode: string },
+    input: CreateProductInput,
+    opts: { status?: ProductStatus } = {},
+  ) {
     await this.validateBrand(input.brandId);
     const validTagIds = await this.filterValidTagIds(input.tagIds);
 
     const productType = input.productType ?? ProductType.SIMPLE;
 
-    // SIMPLE products require price up front; VARIABLE adds variants later.
     if (productType === ProductType.SIMPLE && (input.price == null || input.price < 0)) {
       throw new BadRequestException('Price is required for SIMPLE products');
     }
@@ -302,7 +319,7 @@ export class ProductService {
     const created = await this.prisma.$transaction(async (tx) => {
       const product = await tx.product.create({
         data: {
-          storeId: input.storeId,
+          storeId: store.id,
           name: input.name,
           slug: finalSlug,
           categoryId: input.categoryId,
@@ -311,7 +328,7 @@ export class ProductService {
           shortDescription: input.shortDescription,
           description: input.description,
           productType,
-          status: ProductStatus.DRAFT,
+          status: opts.status ?? ProductStatus.DRAFT,
           isDigital: input.isDigital ?? false,
           weight: input.weight,
           length: input.length,
@@ -327,9 +344,6 @@ export class ProductService {
         },
       });
 
-      // Auto-create the implicit default variant ONLY for SIMPLE products.
-      // VARIABLE products defer variant creation to the dedicated /variants
-      // management page so the seller can pick axes + generate a matrix.
       if (productType === ProductType.SIMPLE) {
         const rawSku =
           input.sku || `${this.generateSlug(input.name)}-${Date.now()}`;
@@ -345,10 +359,9 @@ export class ProductService {
         });
         await this.inventoryService.ensureInventoryRow(
           defaultVariant.id,
-          input.storeId,
+          store.id,
           tx,
         );
-        // Sync basePrice for simple product
         await tx.product.update({
           where: { id: product.id },
           data: { basePrice: input.price! },
@@ -361,12 +374,43 @@ export class ProductService {
     return this.findOneById(created.id);
   }
 
+  /**
+   * Admin: create a product under any store. Skips the seller-ownership
+   * check (admin verifies store validity by selecting it from a picker).
+   */
+  async adminCreate(input: AdminCreateProductInput) {
+    const store = await this.prisma.store.findUnique({
+      where: { id: input.storeId },
+    });
+    if (!store || store.deletedAt) {
+      throw new NotFoundException(`Store ${input.storeId} not found`);
+    }
+    if (store.status !== 'ACTIVE') {
+      throw new BadRequestException(
+        `Store must be ACTIVE. Current: ${store.status}`,
+      );
+    }
+    return this.createProductForStore(store, input, { status: input.status });
+  }
+
   // ---------------------------------------------------------------------------
   // Update — partial; price/sku land on default variant
   // ---------------------------------------------------------------------------
 
   async updateMyProduct(userId: string, input: UpdateProductInput) {
     const product = await this.assertProductOwnership(userId, input.id);
+    return this.updateProductRecord(product, input);
+  }
+
+  /**
+   * Owner-agnostic core: applies a partial update to a Product (+ default
+   * variant for SIMPLE pricing fields). Both `updateMyProduct` (seller-self,
+   * ownership-checked) and `adminUpdate` (admin) call this.
+   */
+  private async updateProductRecord(
+    product: { id: string; slug: string },
+    input: UpdateProductInput,
+  ) {
     if (input.brandId !== undefined) await this.validateBrand(input.brandId);
     const validTagIds =
       input.tagIds !== undefined
@@ -468,6 +512,27 @@ export class ProductService {
       await this.syncBasePrice(product.id);
     }
 
+    return this.findOneById(product.id);
+  }
+
+  /**
+   * Admin: update any product. Bypasses seller-ownership check.
+   * Optionally apply a status change in the same call via `adminSetStatus`.
+   */
+  async adminUpdate(input: AdminUpdateProductInput) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: input.id },
+    });
+    if (!product || product.deletedAt) {
+      throw new NotFoundException(`Product ${input.id} not found`);
+    }
+
+    const { status, ...rest } = input;
+    await this.updateProductRecord(product, rest);
+
+    if (status !== undefined && status !== product.status) {
+      return this.adminSetStatus({ id: product.id, status });
+    }
     return this.findOneById(product.id);
   }
 

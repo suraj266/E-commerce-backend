@@ -10,6 +10,7 @@ import { PrismaService } from '@/prisma/prisma.service';
 import { CreateStoreInput } from './dto/create-store.input';
 import { UpdateStoreInput } from './dto/update-store.input';
 import { SetStoreStatusInput } from './dto/set-store-status.input';
+import { AdminCreateStoreInput } from './dto/admin-create-store.input';
 import { CreateWarehouseInput } from './dto/create-warehouse.input';
 import { UpdateWarehouseInput } from './dto/update-warehouse.input';
 
@@ -71,20 +72,35 @@ export class StoreService {
 
   async createMyStore(userId: string, input: CreateStoreInput) {
     const seller = await this.assertVerifiedSeller(userId);
+    return this.createStoreForSeller(seller.id, input);
+  }
 
+  /**
+   * Owner-agnostic core: writes a Store for the given sellerId. Both
+   * `createMyStore` (seller-self) and `adminCreate` (admin) call this.
+   *
+   * - Atomic: also creates a default warehouse so the store can immediately
+   *   hold inventory. Address is a placeholder until edited.
+   * - `opts.status` controls the resulting store status. Default DRAFT for
+   *   seller-self; admin passes ACTIVE so the store is usable immediately.
+   * - `opts.isFeatured` only honored from admin path (seller can never
+   *   self-feature a store).
+   */
+  private async createStoreForSeller(
+    sellerId: string,
+    input: CreateStoreInput,
+    opts: { status?: StoreStatus; isFeatured?: boolean } = {},
+  ) {
     const rawSlug = input.slug || this.generateSlug(input.name);
     const existing = await this.prisma.store.findUnique({
       where: { slug: rawSlug },
     });
     const finalSlug = existing ? `${rawSlug}-${Date.now()}` : rawSlug;
 
-    // Atomic: store + default warehouse so every store can immediately hold
-    // inventory. Address is a placeholder the seller edits before fulfilling
-    // any orders — see /seller/warehouses.
     return this.prisma.$transaction(async (tx) => {
       const store = await tx.store.create({
         data: {
-          sellerId: seller.id,
+          sellerId,
           name: input.name,
           slug: finalSlug,
           description: input.description,
@@ -95,7 +111,8 @@ export class StoreService {
           locale: input.locale ?? 'en-IN',
           supportEmail: input.supportEmail,
           supportPhone: input.supportPhone,
-          isFeatured: false, // admin only
+          status: opts.status ?? StoreStatus.DRAFT,
+          isFeatured: opts.isFeatured ?? false,
         },
       });
 
@@ -122,6 +139,29 @@ export class StoreService {
   }
 
   /**
+   * Admin: create a store under any seller (skips the seller-self
+   * verification check; admin verifies seller validity by selecting them).
+   * Resulting store is ACTIVE so it can immediately hold products.
+   */
+  async adminCreate(input: AdminCreateStoreInput) {
+    const seller = await this.prisma.seller.findUnique({
+      where: { id: input.sellerId },
+    });
+    if (!seller || seller.deletedAt) {
+      throw new NotFoundException(`Seller ${input.sellerId} not found`);
+    }
+    if (seller.overallStatus !== 'VERIFIED') {
+      throw new BadRequestException(
+        `Seller must be VERIFIED to attach a store. Current: ${seller.overallStatus}`,
+      );
+    }
+    return this.createStoreForSeller(seller.id, input, {
+      status: StoreStatus.ACTIVE,
+      isFeatured: input.isFeatured,
+    });
+  }
+
+  /**
    * Returns the default warehouse for a store, or throws if none exists.
    * Used by inventory module to know where to place auto-created stock rows
    * when sellers add new variants. Every store should have a default
@@ -142,11 +182,25 @@ export class StoreService {
 
   async updateMyStore(userId: string, input: UpdateStoreInput) {
     const store = await this.assertOwnership(userId, input.id);
+    return this.updateStoreRecord(store, input);
+  }
 
+  /**
+   * Owner-agnostic core: applies a partial update to a Store. Both
+   * `updateMyStore` (seller-self, ownership-checked) and `adminUpdate`
+   * (admin) call this.
+   *
+   * Business rules preserved for admin too: slug uniqueness enforced,
+   * currency cannot change once products exist (admin doesn't get magic
+   * powers to corrupt data — they'd manually migrate first).
+   */
+  private async updateStoreRecord(
+    store: { id: string; slug: string; currencyCode: string },
+    input: UpdateStoreInput,
+  ) {
     const { id: _id, slug, currencyCode, ...rest } = input;
     const data: Prisma.StoreUpdateInput = { ...rest };
 
-    // Slug uniqueness — only when seller explicitly changes it
     if (slug && slug !== store.slug) {
       const conflict = await this.prisma.store.findUnique({ where: { slug } });
       if (conflict && conflict.id !== store.id) {
@@ -155,7 +209,6 @@ export class StoreService {
       data.slug = slug;
     }
 
-    // Currency immutable once products exist
     if (currencyCode && currencyCode !== store.currencyCode) {
       const productCount = await this.prisma.product.count({
         where: { storeId: store.id },
@@ -173,6 +226,15 @@ export class StoreService {
       data,
       include: { warehouses: { where: { deletedAt: null } } },
     });
+  }
+
+  /**
+   * Admin: update any store. Bypasses seller-ownership check; same business
+   * rules (slug uniqueness, currency immutability) still apply.
+   */
+  async adminUpdate(input: UpdateStoreInput) {
+    const store = await this.findOne(input.id);
+    return this.updateStoreRecord(store, input);
   }
 
   async submitMyStoreForReview(userId: string, storeId: string) {

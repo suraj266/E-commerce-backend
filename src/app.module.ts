@@ -41,6 +41,7 @@ import { ImageModule } from './modules/media/image/image.module';
 import { AdminThemeModule } from './modules/admin/admin-theme/admin-theme.module';
 import { SiteSettingModule } from './modules/admin/site-setting/site-setting.module';
 import { EmailModule } from './modules/admin/email/email.module';
+import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
 
 
 @Module({
@@ -93,6 +94,7 @@ import { EmailModule } from './modules/admin/email/email.module';
     AdminThemeModule,
     SiteSettingModule,
     EmailModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [AppService, { provide: APP_GUARD, useClass: GqlThrottlerGuard }],

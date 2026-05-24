@@ -10,6 +10,7 @@ import {
 } from './entities/seller-list-item.entity';
 import { CreateSellerInput } from './dto/create-seller.input';
 import { UpdateSellerInput } from './dto/update-seller.input';
+import { AdminCreateSellerInput } from './dto/admin-create-seller.input';
 import {
   SetSellerStatusInput,
   VerifySellerSectionInput,
@@ -105,6 +106,13 @@ export class SellerResolver {
   // ---------------------------------------------------------------------------
   // Admin verification mutations
   // ---------------------------------------------------------------------------
+
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('seller:create')
+  @Mutation(() => Seller)
+  adminCreateSeller(@Args('input') input: AdminCreateSellerInput) {
+    return this.sellerService.adminCreate(input);
+  }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:update')
