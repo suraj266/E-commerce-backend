@@ -9,27 +9,14 @@
  */
 
 import { PrismaClient } from '@prisma/client';
+import {
+  EMAIL_HEADER_HTML as HEADER_HTML,
+  EMAIL_FOOTER_HTML as FOOTER_HTML,
+  EMAIL_HEADER_VARIABLES,
+  EMAIL_FOOTER_VARIABLES,
+} from './email-partials';
 
 const prisma = new PrismaClient();
-
-const HEADER_HTML = `<!DOCTYPE html>
-<html><body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f4f4f5;color:#18181b;">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f4f5;">
-  <tr><td align="center" style="padding:24px 12px;">
-    <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
-      <tr><td style="padding:24px 32px;border-bottom:1px solid #e4e4e7;">
-        <h1 style="margin:0;font-size:18px;font-weight:600;">{{shopName}}</h1>
-      </td></tr>
-      <tr><td style="padding:32px;">`;
-
-const FOOTER_HTML = `      </td></tr>
-      <tr><td style="padding:24px 32px;background:#fafafa;border-top:1px solid #e4e4e7;font-size:12px;color:#71717a;text-align:center;">
-        <p style="margin:0;">© {{shopName}}. This is an automated message — please do not reply.</p>
-      </td></tr>
-    </table>
-  </td></tr>
-</table>
-</body></html>`;
 
 const templates = [
   // ---- Partials ----
@@ -40,7 +27,7 @@ const templates = [
     category: 'PARTIAL' as const,
     subject: '',
     htmlBody: HEADER_HTML,
-    variables: ['shopName'],
+    variables: EMAIL_HEADER_VARIABLES,
     isEnabled: true,
     isSystem: true,
   },
@@ -51,7 +38,7 @@ const templates = [
     category: 'PARTIAL' as const,
     subject: '',
     htmlBody: FOOTER_HTML,
-    variables: ['shopName'],
+    variables: EMAIL_FOOTER_VARIABLES,
     isEnabled: true,
     isSystem: true,
   },

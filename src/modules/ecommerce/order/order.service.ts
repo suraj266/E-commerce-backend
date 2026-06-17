@@ -18,7 +18,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { OrderStatus, Prisma } from '@prisma/client';
+import { OrderStatus, PaymentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
 import { config } from '@/common/config/config';
@@ -231,6 +231,132 @@ export class OrderService {
     this.dispatchCancelEmail(orderId, notes).catch((err) =>
       this.logger.warn(
         `Cancel email failed for ${orderId}: ${(err as Error).message}`,
+      ),
+    );
+
+    return hydrateOrder(fresh);
+  }
+
+  /**
+   * System-driven cancellation when a PREPAID order's payment is cancelled by
+   * the customer or fails at the gateway. Unlike `cancelMyOrder` there is no
+   * ownership check — the caller is the PaymentService / webhook (changedById
+   * is null on the history rows).
+   *
+   * Idempotent: a no-op if the order is already CANCELLED or already PAID. The
+   * PAID guard is the key race-protection — if the `payment.captured` webhook
+   * lands just before a stray cancel signal, we never cancel a paid order.
+   *
+   * Cascade mirrors `cancelMyOrder`: every SellerOrder → CANCELLED, parent →
+   * CANCELLED, both flip paymentStatus → FAILED, reserved stock is released,
+   * and the reason is written to OrderStatusHistory.notes.
+   */
+  async cancelForPaymentFailure(orderId: string, reason: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { sellerOrders: { include: { items: true } } },
+    });
+    if (!order || order.deletedAt) {
+      this.logger.warn(
+        `cancelForPaymentFailure: order ${orderId} not found — skipping.`,
+      );
+      return null;
+    }
+    // Idempotent: never re-cancel, never cancel a captured payment.
+    if (
+      order.status === OrderStatus.CANCELLED ||
+      order.paymentStatus === PaymentStatus.PAID
+    ) {
+      return hydrateOrder(
+        await this.prisma.order.findUnique({
+          where: { id: orderId },
+          include: ORDER_INCLUDE,
+        }),
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const now = new Date();
+
+      for (const so of order.sellerOrders) {
+        if (so.status === OrderStatus.CANCELLED) continue;
+        await tx.sellerOrder.update({
+          where: { id: so.id },
+          data: {
+            status: OrderStatus.CANCELLED,
+            paymentStatus: PaymentStatus.FAILED,
+            cancelledAt: now,
+          },
+        });
+        await tx.orderStatusHistory.create({
+          data: {
+            sellerOrderId: so.id,
+            fromStatus: so.status,
+            toStatus: OrderStatus.CANCELLED,
+            changedById: null, // system-driven
+            notes: reason,
+          },
+        });
+      }
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.CANCELLED,
+          paymentStatus: PaymentStatus.FAILED,
+          cancelledAt: now,
+        },
+      });
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId,
+          fromStatus: order.status,
+          toStatus: OrderStatus.CANCELLED,
+          changedById: null, // system-driven
+          notes: reason,
+        },
+      });
+
+      // Release the inventory reserved at placement (same reversal as
+      // cancelMyOrder — revert qtyReserved → qtyAvailable per movement).
+      const movements = await tx.inventoryMovement.findMany({
+        where: { referenceType: 'order', referenceId: orderId },
+      });
+      for (const m of movements) {
+        const restore = Math.abs(m.quantityChange);
+        const inv = await tx.inventory.update({
+          where: { id: m.inventoryId },
+          data: {
+            quantityAvailable: { increment: restore },
+            quantityReserved: { decrement: restore },
+          },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            inventoryId: m.inventoryId,
+            variantId: m.variantId,
+            warehouseId: m.warehouseId,
+            movementType: 'return',
+            quantityChange: restore,
+            quantityBefore: inv.quantityAvailable - restore,
+            quantityAfter: inv.quantityAvailable,
+            referenceType: 'order_cancel',
+            referenceId: orderId,
+            createdById: null,
+            notes: `Released from ${order.orderNumber} — ${reason}`,
+          },
+        });
+      }
+    });
+
+    const fresh = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: ORDER_INCLUDE,
+    });
+
+    this.dispatchCancelEmail(orderId, reason).catch((err) =>
+      this.logger.warn(
+        `Payment-failure cancel email failed for ${orderId}: ${(err as Error).message}`,
       ),
     );
 

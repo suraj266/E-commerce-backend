@@ -11,6 +11,7 @@ import { RoleModule } from './modules/identity/role/role.module';
 import { CustomerModule } from './modules/identity/customer/customer.module';
 import { AddressModule } from './modules/identity/address/address.module';
 import { ThrottlerModule } from "@nestjs/throttler";
+import { ScheduleModule } from "@nestjs/schedule";
 import { APP_GUARD } from "@nestjs/core";
 import { GqlThrottlerGuard } from "./libs/gqlThtottlerGuard.module";
 import { HealthModule } from "./modules/health/health.module";
@@ -30,6 +31,12 @@ import { OrderModule } from './modules/ecommerce/order/order.module';
 import { PaymentModule } from './modules/ecommerce/payment/payment.module';
 import { CouponModule } from './modules/ecommerce/coupon/coupon.module';
 import { ReviewModule } from './modules/ecommerce/review/review.module';
+import { InvoiceModule } from './modules/ecommerce/invoice/invoice.module';
+import { CatalogStatsModule } from './modules/ecommerce/catalog-stats/catalog-stats.module';
+import { LabelModule } from './modules/ecommerce/label/label.module';
+import { CollectionModule } from './modules/ecommerce/collection/collection.module';
+import { ShippingModule } from './modules/ecommerce/shipping/shipping.module';
+import { CourierModule } from './modules/ecommerce/courier/courier.module';
 // CMS modules
 import { PageModule } from './modules/cms/page/page.module';
 import { MenuModule } from './modules/cms/menu/menu.module';
@@ -63,6 +70,7 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
         },
       ],
     }),
+    ScheduleModule.forRoot(),
     RoleModule,
     CustomerModule,
     AddressModule,
@@ -83,6 +91,12 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
     PaymentModule,
     CouponModule,
     ReviewModule,
+    InvoiceModule,
+    CatalogStatsModule,
+    LabelModule,
+    CollectionModule,
+    ShippingModule,
+    CourierModule,
     // ---- CMS Modules ----
     PageModule,
     MenuModule,

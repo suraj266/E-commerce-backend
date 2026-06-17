@@ -27,7 +27,7 @@ import { CreateReviewInput } from './dto/create-review.input';
 import { UpdateReviewInput } from './dto/update-review.input';
 
 const REVIEW_INCLUDE = {
-  customer: { include: { user: { select: { name: true } } } },
+  customer: { include: { user: { select: { name: true, avatarUrl: true } } } },
   media: { orderBy: { displayOrder: 'asc' as const } },
 } as const;
 
@@ -576,6 +576,7 @@ export class ReviewService {
       productId: row.productId,
       customerId: row.customerId,
       customerName: row.customer?.user?.name ?? null,
+      customerAvatarUrl: row.customer?.user?.avatarUrl ?? null,
       rating: row.rating,
       title: row.title,
       body: row.body,

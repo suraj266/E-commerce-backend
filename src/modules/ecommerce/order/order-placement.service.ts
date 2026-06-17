@@ -52,7 +52,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, OrderStatus, PaymentStatus } from '@prisma/client';
+import { Prisma, OrderStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
@@ -61,6 +61,22 @@ import { config } from '@/common/config/config';
 import { PlaceOrderInput } from './dto/place-order.input';
 import { generateOrderNumber } from './order.helpers';
 import { ORDER_INCLUDE, hydrateOrder } from './order.hydrate';
+import {
+  fromInclusiveMrp,
+  getTaxKind,
+  splitTax,
+  type TaxBreakup,
+  type TaxKind,
+} from '@/modules/ecommerce/tax/place-of-supply';
+import {
+  computeSellerShipping,
+  isCodEligible,
+  isServiceable,
+  parseShippingConfig,
+  type ShippingConfig,
+} from '@/modules/ecommerce/shipping/shipping-rate';
+import { CourierService, type ResolvedRate } from '@/modules/ecommerce/courier/courier.service';
+import { resolveState, GST_STATES } from '@/common/constants/gst-states';
 
 interface InventoryDeduction {
   inventoryId: string;
@@ -79,8 +95,22 @@ interface PlannedItem {
   name: string;
   variantName: string | null;
   quantity: number;
+  /**
+   * Stored unit price as set by the seller. Interpretation depends on
+   * `priceTaxInclusive` — when true (default in Phase 1), this is MRP
+   * (customer-facing); when false, this is the pre-tax taxable value.
+   */
   unitPrice: number;
-  taxRate: number; // percentage 0-100
+  /** % GST rate from Product.tax.rate (0–100). */
+  taxRate: number;
+  /** Per-unit weight (kg) — variant ?? product ?? null (→ default at calc). */
+  weight: number | null;
+  /** True when stored price already includes GST (Indian retail default). */
+  priceTaxInclusive: boolean;
+  /** HSN code snapshot for the tax invoice (Rule 46). */
+  hsnCode: string | null;
+  /** ISO 3166-1 alpha-2 country of origin snapshot. */
+  countryOfOrigin: string | null;
   attributesSnapshot: { attributeName: string; value: string }[];
   imageUrlSnapshot: string | null;
   deductions: InventoryDeduction[];
@@ -107,6 +137,7 @@ export class OrderPlacementService {
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
     private readonly coupon: CouponService,
+    private readonly courier: CourierService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -221,11 +252,35 @@ export class OrderPlacementService {
         quantity: it.quantity,
         unitPrice: Number(it.variant.price),
         taxRate: it.product.tax ? Number(it.product.tax.rate) : 0,
+        weight:
+          it.variant.weight != null
+            ? Number(it.variant.weight)
+            : it.product.weight != null
+              ? Number(it.product.weight)
+              : null,
+        priceTaxInclusive: it.product.isPriceTaxInclusive !== false,
+        hsnCode: it.product.hsnCode ?? null,
+        countryOfOrigin: it.product.countryOfOrigin ?? null,
         attributesSnapshot,
         imageUrlSnapshot,
         deductions,
       });
     }
+
+    // ---- Resolve place-of-supply once for the whole order ------------------
+    // Buyer state comes from the shipping address. We canonicalise via
+    // GST_STATES so a stray "MH" / "Maharashtra" / "27" all collapse to
+    // the same code. Throws BadRequest with a clear hint if unresolvable —
+    // the customer is prompted to update their address.
+    const buyerState = resolveState(shippingAddress.state);
+    if (!buyerState) {
+      throw new BadRequestException(
+        `Cannot determine state from shipping address "${shippingAddress.state}". ` +
+          `Please pick a valid Indian state on your saved address.`,
+      );
+    }
+    const buyerStateCode = buyerState.code;
+    const buyerStateName = buyerState.name;
 
     // ---- Step 4: Group by seller, compute totals ---------------------------
     const groups = new Map<string, PlannedItem[]>();
@@ -239,15 +294,18 @@ export class OrderPlacementService {
     const orderNumberSuffix = generateOrderNumber('ORD').replace('ORD-', '');
     const parentOrderNumber = `ORD-${orderNumberSuffix}`;
 
-    // ---- Step 4a: Per-line subtotals (pre-discount) ------------------------
-    // Build the seller-order shells now so we can run coupon validation
-    // against accurate per-store subtotals. Tax + commission + payout are
-    // computed LATER, after any per-line discount allocation, so GST lands
-    // on the discounted taxable value (CGST Act §15(3)(a)).
+    // ---- Step 4a: Per-line math + per-seller PoS resolution ----------------
+    // `lineSubtotal` is the customer-facing line value used for coupon
+    // apportionment + the customer-facing parent subtotal. For tax-inclusive
+    // catalogs that's the MRP × qty; for exclusive ones it's pre-tax × qty.
+    // `lineTaxable` is the pre-tax taxable value used for the GST calc and
+    // is back-calculated from MRP when the product is inclusive.
     interface LineMath {
-      lineSubtotal: number;
-      lineDiscount: number;   // share of the coupon's per-store discount
-      lineTax: number;        // GST on (subtotal - discount)
+      lineSubtotal: number;       // customer-facing (MRP*qty for inclusive)
+      lineTaxable: number;        // pre-tax taxable value (taxable before discount)
+      lineDiscount: number;       // share of the coupon's per-store discount
+      lineTaxableAfter: number;   // taxable - discount, fed into splitTax()
+      breakup: TaxBreakup;        // CGST/SGST or IGST breakdown for this line
     }
     const lineMaths: LineMath[][] = []; // parallel to sellerOrderRows order
 
@@ -255,40 +313,94 @@ export class OrderPlacementService {
       id: string;
       sellerId: string;
       storeId: string;
+      storeName: string;
       orderNumber: string;
-      subtotal: number;       // pre-discount, shown on invoice as gross
-      taxAmount: number;      // GST on (subtotal - discount), GST-correct
-      discountAmount: number; // sum of per-line discounts
+      subtotal: number;
+      taxAmount: number;
+      discountAmount: number;
       commissionAmount: number;
       payoutAmount: number;
-      commissionRate: number; // captured for the post-discount recompute
+      /** Composite-supply shipping charge (tax-inclusive). Filled in step 4c. */
+      shippingAmount: number;
+      /** Pre-tax taxable value of the shipping charge. Filled in step 4c. */
+      shippingTaxable: number;
+      /** Shipping GST split (CGST/SGST or IGST). Filled in step 4c. */
+      shippingBreakup: TaxBreakup;
+      /** Courier snapshot ('LIVE'|'IN_HOUSE' + selected courier). Filled in step 4c. */
+      shippingRateSource: string;
+      liveRate: ResolvedRate | null;
+      billableWeightKg: number;
+      commissionRate: number;
+      /** Seller's GST state code, used to derive tax kind for every line. */
+      sellerStateCode: string;
+      taxKind: TaxKind;
+      /** Parsed per-store shipping config (rates + COD + serviceability). */
+      shippingConfig: ShippingConfig;
       items: PlannedItem[];
     }[] = [];
 
     for (const [, items] of groups) {
-      const seller = await this.prisma.seller.findUnique({
-        where: { id: items[0].sellerId },
-        select: { commissionRate: true },
-      });
+      // Seller-level data: commission rate + GST state. The Store-level state
+      // overrides Seller-level if set (a single legal entity can register
+      // separately in multiple states). Throws if neither is set — a
+      // seller without state cannot legally invoice from this platform.
+      const [seller, store] = await Promise.all([
+        this.prisma.seller.findUnique({
+          where: { id: items[0].sellerId },
+          select: { commissionRate: true, stateCode: true },
+        }),
+        this.prisma.store.findUnique({
+          where: { id: items[0].storeId },
+          select: { stateCode: true, name: true, shippingConfig: true },
+        }),
+      ]);
       const commissionRate = Number(seller?.commissionRate ?? 0);
+      const sellerStateCode = store?.stateCode || seller?.stateCode || null;
+      if (!sellerStateCode) {
+        throw new BadRequestException(
+          `Seller is missing a GST state and cannot accept orders yet. ` +
+            `Please contact platform support.`,
+        );
+      }
+      const taxKind = getTaxKind(sellerStateCode, buyerStateCode);
+      const shippingConfig = parseShippingConfig(store?.shippingConfig);
 
-      const itemMaths: LineMath[] = items.map((it) => ({
-        lineSubtotal: it.unitPrice * it.quantity,
-        lineDiscount: 0,
-        lineTax: 0,
-      }));
+      const itemMaths: LineMath[] = items.map((it) => {
+        const lineGross = it.unitPrice * it.quantity;
+        // The stored unitPrice is always the pre-tax BASE, so the taxable value
+        // is the gross itself — GST is added on top (never back-calculated out).
+        const lineTaxable = lineGross;
+        return {
+          lineSubtotal: round2(lineGross),
+          lineTaxable,
+          lineDiscount: 0,
+          lineTaxableAfter: lineTaxable,
+          // Placeholder breakup; filled in step 4c after coupon allocation.
+          breakup: splitTax(0, it.taxRate, taxKind),
+        };
+      });
       const soSubtotal = itemMaths.reduce((s, m) => s + m.lineSubtotal, 0);
 
       sellerOrderRows.push({
         id: randomUUID(),
         sellerId: items[0].sellerId,
         storeId: items[0].storeId,
+        storeName: store?.name ?? 'the seller',
         orderNumber: `SORD-${orderNumberSuffix}`,
         subtotal: round2(soSubtotal),
         taxAmount: 0,        // filled in step 4c
         discountAmount: 0,   // filled in step 4c
         commissionAmount: 0, // filled in step 4c
         payoutAmount: 0,     // filled in step 4c
+        shippingAmount: 0,   // filled in step 4c
+        shippingTaxable: 0,  // filled in step 4c
+        shippingBreakup: splitTax(0, 0, taxKind), // filled in step 4c
+        shippingRateSource: 'IN_HOUSE', // filled in step 4c
+        liveRate: null,      // filled in step 4b.1
+        billableWeightKg: 0, // filled in step 4b.1
+        sellerStateCode,
+        taxKind,
+        shippingConfig,
         commissionRate,
         items,
       });
@@ -318,6 +430,7 @@ export class OrderPlacementService {
           storeId: so.storeId,
           lineTotal: m.lineSubtotal,
           taxRate: so.items[j].taxRate,
+          priceTaxInclusive: so.items[j].priceTaxInclusive,
         })),
       );
       const result = await this.coupon.validateAndCompute({
@@ -336,11 +449,44 @@ export class OrderPlacementService {
 
     // ---- Step 4c: Per-line discount + tax-on-discounted-base ----------------
     // For each seller-order: allocate the store's coupon discount across its
-    // lines proportionally to lineSubtotal. The last line eats any rounding
-    // drift so the sum ties exactly to the store's allotment.
+    // lines proportionally to `lineSubtotal` (customer-facing — this is the
+    // same denominator used by CouponService when it computed the per-store
+    // allotment, so allocations remain consistent end-to-end). The last
+    // line absorbs any rounding drift so the sum ties exactly to the
+    // store's allotment.
+    //
+    // Tax is then computed on the post-discount TAXABLE value (back-calc
+    // from MRP for inclusive products), with the CGST/SGST or IGST split
+    // determined by the seller-order's taxKind.
     let parentSubtotal = 0;
     let parentTax = 0;
     let parentDiscount = 0;
+    let parentShipping = 0;
+    let parentShippingTax = 0;
+
+    // ---- Step 4b.1: Pre-fetch LIVE courier rates (parallel, pre-transaction).
+    // Each seller with an enabled courier account gets a live rate; a null
+    // result (no account / error / timeout) falls back to the in-house engine.
+    // This MUST stay outside the $transaction — external HTTP must never hold
+    // a DB connection. `resolveSellerRate` never throws.
+    await Promise.all(
+      sellerOrderRows.map(async (so) => {
+        const billable = computeSellerShipping({
+          items: so.items.map((it) => ({ weight: it.weight, qty: it.quantity })),
+          merchandiseSubtotal: so.subtotal,
+          config: so.shippingConfig,
+        }).billableWeightKg;
+        so.billableWeightKg = billable;
+        so.liveRate = await this.courier.resolveSellerRate({
+          sellerId: so.sellerId,
+          storeId: so.storeId,
+          deliveryPincode: shippingAddress.postalCode,
+          billableWeightKg: billable,
+          declaredValue: so.subtotal,
+          cod: input.paymentMethod === PaymentMethod.COD,
+        });
+      }),
+    );
 
     for (let i = 0; i < sellerOrderRows.length; i++) {
       const so = sellerOrderRows[i];
@@ -349,6 +495,7 @@ export class OrderPlacementService {
       const storeDiscount = perStoreDiscount.get(so.storeId) ?? 0;
 
       let allocated = 0;
+      let soTax = 0;
       for (let j = 0; j < items.length; j++) {
         const m = maths[j];
         const it = items[j];
@@ -361,40 +508,125 @@ export class OrderPlacementService {
         } else {
           lineDiscount = 0;
         }
-        const taxableValue = Math.max(0, m.lineSubtotal - lineDiscount);
-        const lineTax = round2((taxableValue * it.taxRate) / 100);
+        // The stored price is the pre-tax base, so lineSubtotal == lineTaxable
+        // and the coupon discount applies 1:1 to the taxable value (§15(3)(a)).
+        const lineDiscountTaxable = lineDiscount;
+        const taxableAfter = Math.max(0, m.lineTaxable - lineDiscountTaxable);
+
+        const breakup = splitTax(taxableAfter, it.taxRate, so.taxKind);
 
         m.lineDiscount = lineDiscount;
-        m.lineTax = lineTax;
+        m.lineTaxableAfter = taxableAfter;
+        m.breakup = breakup;
+        soTax += breakup.totalTax;
       }
 
-      const soTax = maths.reduce((s, m) => s + m.lineTax, 0);
-      const soTaxableValue = so.subtotal - storeDiscount;
-      // Commission on the taxable (post-discount) value — matches the
-      // seller's actual GST-recognised revenue and is the typical contract
-      // term for Indian marketplaces.
-      const commissionAmount = round2((soTaxableValue * so.commissionRate) / 100);
-      // Payout = taxable value + GST collected on that value − commission.
-      // The customer pays exactly this to the platform; platform pays the
-      // commission to itself and forwards the rest to the seller.
-      const payoutAmount = round2(soTaxableValue + soTax - commissionAmount);
+      // soTaxableValue = sum of post-discount taxable values (pre-tax).
+      // Commission contractually applies to the seller's GST-recognised
+      // taxable supply, NOT the customer-facing MRP, regardless of pricing
+      // mode — keeps the seller's effective commission identical across
+      // inclusive vs exclusive catalogs.
+      const soTaxableValue = maths.reduce((s, m) => s + m.lineTaxableAfter, 0);
+      const commissionAmount = round2(
+        (soTaxableValue * so.commissionRate) / 100,
+      );
 
-      so.taxAmount = round2(soTax);
+      // ---- Shipping (composite supply, CGST §8 / Decision D7) -------------
+      // Charge from the per-store rate engine (same pure fn as the preview
+      // quote, so what the customer saw == what they pay). Free-threshold is
+      // judged on the PRE-discount subtotal so a coupon can't silently revoke
+      // free shipping. The charge is tax-INCLUSIVE; its GST is back-calculated
+      // at the PRINCIPAL supply's rate — the highest post-discount-taxable
+      // line in this seller-order.
+      let principalRate = 0;
+      let maxTaxable = -1;
+      for (let j = 0; j < items.length; j++) {
+        if (maths[j].lineTaxableAfter > maxTaxable) {
+          maxTaxable = maths[j].lineTaxableAfter;
+          principalRate = items[j].taxRate;
+        }
+      }
+      // Live courier rate (pre-fetched) wins; else the in-house flat engine.
+      // ONLY the source of `shippingCharge` changes — the composite-supply GST
+      // back-calc below is identical for both (the rate is tax-inclusive).
+      const inhouse = computeSellerShipping({
+        items: items.map((it) => ({ weight: it.weight, qty: it.quantity })),
+        merchandiseSubtotal: so.subtotal, // pre-discount, customer-facing
+        config: so.shippingConfig,
+      });
+      const shippingCharge = so.liveRate ? so.liveRate.rate : inhouse.shippingCharge;
+      so.shippingRateSource = so.liveRate ? 'LIVE' : 'IN_HOUSE';
+      let shippingTaxable = 0;
+      let shippingBreakup = splitTax(0, principalRate, so.taxKind);
+      if (shippingCharge > 0) {
+        shippingTaxable = fromInclusiveMrp(shippingCharge, principalRate);
+        shippingBreakup = splitTax(shippingTaxable, principalRate, so.taxKind);
+      }
+      const shippingTax = shippingBreakup.totalTax;
+
+      // Payout = merchandise (taxable + GST − commission) + FULL shipping
+      // charge (taxable + its GST). Shipping revenue accrues to the seller to
+      // pay the courier; commission stays on the MERCHANDISE base only.
+      const payoutAmount = round2(
+        soTaxableValue + soTax - commissionAmount + shippingTaxable + shippingTax,
+      );
+
+      so.taxAmount = round2(soTax + shippingTax); // full GST incl. shipping
       so.discountAmount = round2(storeDiscount);
       so.commissionAmount = commissionAmount;
       so.payoutAmount = payoutAmount;
+      so.shippingAmount = shippingCharge;
+      so.shippingTaxable = round2(shippingTaxable);
+      so.shippingBreakup = shippingBreakup;
 
       parentSubtotal += so.subtotal;
       parentTax += so.taxAmount;
       parentDiscount += so.discountAmount;
+      parentShipping += so.shippingAmount;
+      parentShippingTax += shippingTax;
     }
 
-    const totalAmount = round2(parentSubtotal + parentTax - parentDiscount);
+    // Customer-facing total. The stored price is the pre-tax base, so the
+    // MERCHANDISE tax is always added on top: parentTax − parentShippingTax
+    // (parentTax also carries the shipping GST). Shipping is added as a single
+    // TAX-INCLUSIVE line (parentShipping already contains its own GST), so we
+    // never add parentShippingTax again — that would double-count it.
+    const merchandiseTax = round2(parentTax - parentShippingTax);
+    const totalAmount = round2(
+      parentSubtotal + merchandiseTax - parentDiscount + parentShipping,
+    );
     couponDiscount = round2(parentDiscount); // tie out exactly to per-store sum
+
+    // ---- Step 4d: Serviceability + COD eligibility guard --------------------
+    // Validated AFTER shipping is computed so the COD limit sees the real
+    // cash-collected amount (subtotal − discount + shipping) per seller.
+    // When a LIVE courier rate was found, serviceability + COD were already
+    // confirmed by the courier (pickCourier filters non-serviceable / non-COD),
+    // so only the IN-HOUSE fallback path applies the static guards.
+    for (const so of sellerOrderRows) {
+      if (so.liveRate) continue;
+      if (!isServiceable(so.shippingConfig, shippingAddress.postalCode)) {
+        throw new BadRequestException(
+          `${so.storeName} does not deliver to PIN ${shippingAddress.postalCode}.`,
+        );
+      }
+      if (input.paymentMethod === PaymentMethod.COD) {
+        const sellerGrandTotal = round2(
+          so.subtotal - so.discountAmount + so.shippingAmount,
+        );
+        if (!isCodEligible(so.shippingConfig, sellerGrandTotal)) {
+          throw new BadRequestException(
+            `Cash on Delivery is not available for items from ${so.storeName} on this order.`,
+          );
+        }
+      }
+    }
 
     // ---- Step 5: One transaction commits everything ------------------------
     await this.prisma.$transaction(async (tx) => {
-      // (a) parent Order
+      // (a) parent Order — also captures place-of-supply (CGST §12 trail)
+      //     and optional buyer GSTIN (B2B invoice flag) for downstream
+      //     invoice rendering.
       await tx.order.create({
         data: {
           id: orderId,
@@ -405,7 +637,7 @@ export class OrderPlacementService {
           paymentMethod: input.paymentMethod,
           subtotal: round2(parentSubtotal),
           taxAmount: round2(parentTax),
-          shippingAmount: 0,
+          shippingAmount: round2(parentShipping),
           discountAmount: round2(couponDiscount),
           totalAmount: round2(totalAmount),
           currencyCode: 'INR',
@@ -414,6 +646,9 @@ export class OrderPlacementService {
           shippingAddressId: shippingAddress.id,
           billingAddressId: billingAddress.id,
           customerNotes: input.customerNotes ?? null,
+          buyerGstin: input.buyerGstin?.toUpperCase() ?? null,
+          placeOfSupplyStateCode: buyerStateCode,
+          placeOfSupplyStateName: buyerStateName,
         },
       });
 
@@ -444,10 +679,30 @@ export class OrderPlacementService {
             paymentStatus,
             subtotal: so.subtotal,
             taxAmount: so.taxAmount,
+            shippingAmount: so.shippingAmount,
             discountAmount: so.discountAmount,
             commissionAmount: so.commissionAmount,
             payoutAmount: so.payoutAmount,
             currencyCode: 'INR',
+            // Persisted shipping tax breakup (composite supply) — the invoice
+            // reads these so its CGST/SGST/IGST totals tie to the grand total
+            // without recomputing the principal rate.
+            shippingTaxableValue: so.shippingTaxable,
+            shippingCgstAmount: so.shippingBreakup.cgstAmount,
+            shippingSgstAmount: so.shippingBreakup.sgstAmount,
+            shippingIgstAmount: so.shippingBreakup.igstAmount,
+            // Courier snapshot — so ship-time reuses the quoted courier.
+            shippingRateSource: so.shippingRateSource,
+            shippingProvider: so.liveRate?.provider ?? null,
+            selectedCourierId: so.liveRate?.courierId ?? null,
+            selectedCourierName: so.liveRate?.courierName ?? null,
+            quotedShippingRate: so.liveRate?.rate ?? null,
+            billableWeightKg: so.billableWeightKg,
+            // Mirror parent PoS — invoice rendering reads from SellerOrder
+            // so it can avoid the join.
+            placeOfSupplyStateCode: buyerStateCode,
+            placeOfSupplyStateName: buyerStateName,
+            taxKind: so.taxKind,
           },
         });
 
@@ -466,14 +721,30 @@ export class OrderPlacementService {
               variantName: it.variantName,
               quantity: it.quantity,
               unitPrice: it.unitPrice,
-              // totalPrice = gross line value (pre-discount). Matches Order.subtotal contribution.
+              // totalPrice = customer-facing line value (pre-discount) =
+              // pre-tax base × qty. The customer's parent subtotal sums these;
+              // GST is added on top at the order level.
               totalPrice: round2(m.lineSubtotal),
-              // GST on the discounted taxable value, per CGST Act §15(3)(a).
-              taxAmount: m.lineTax,
-              // Coupon's allocated share for this line (0 when no coupon).
+              // Legacy aggregate field — kept in sync with sum of breakup.
+              taxAmount: round2(m.breakup.totalTax),
               discountAmount: m.lineDiscount,
-              attributesSnapshot: it.attributesSnapshot as unknown as Prisma.InputJsonValue,
+              attributesSnapshot:
+                it.attributesSnapshot as unknown as Prisma.InputJsonValue,
               imageUrlSnapshot: it.imageUrlSnapshot,
+              // Compliance snapshots: pinned for the lifetime of the order
+              // regardless of subsequent product edits.
+              hsnCode: it.hsnCode,
+              countryOfOrigin: it.countryOfOrigin,
+              priceTaxInclusive: it.priceTaxInclusive,
+              taxableValue: m.lineTaxableAfter,
+              cgstRate: m.breakup.cgstRate,
+              cgstAmount: m.breakup.cgstAmount,
+              sgstRate: m.breakup.sgstRate,
+              sgstAmount: m.breakup.sgstAmount,
+              igstRate: m.breakup.igstRate,
+              igstAmount: m.breakup.igstAmount,
+              cessRate: m.breakup.cessRate,
+              cessAmount: m.breakup.cessAmount,
             },
           });
         }
@@ -525,8 +796,13 @@ export class OrderPlacementService {
         }
       }
 
-      // (f) clear cart contents (keep Cart row so future adds reuse it)
-      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      // (f) Clear cart contents (keep the Cart row so future adds reuse it).
+      // For PREPAID orders the cart is cleared only once payment is captured
+      // (PaymentService), NOT here — so if the customer cancels/fails payment
+      // their cart stays intact for an easy retry. COD/immediate orders clear now.
+      if (paymentStatus !== PaymentStatus.AWAITING_PAYMENT) {
+        await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      }
     });
 
     // ---- Step 6: Return the freshly hydrated parent Order ------------------

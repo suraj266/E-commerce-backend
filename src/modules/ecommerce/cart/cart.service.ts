@@ -5,6 +5,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
+import {
+  computePriceWithTax,
+  computeTaxAmount,
+} from '@/common/pricing/price-with-tax.util';
 import { AddToCartInput } from './dto/add-to-cart.input';
 import { UpdateCartItemQtyInput } from './dto/update-cart-item-qty.input';
 import { RemoveCartItemInput } from './dto/remove-cart-item.input';
@@ -111,10 +115,11 @@ export class CartService {
     // demands it. Without this, cart shows the pre-tax price even when
     // `show_price_with_tax = true`.
     const taxRate = p.tax?.rate != null ? Number(p.tax.rate) : null;
+    // The stored price is the pre-tax BASE; priceWithTax adds GST on top and
+    // taxAmount is the GST portion alone — matches placement + the PDP/variant
+    // path. The show_price_with_tax setting only picks which one is displayed.
     const withTax = (price: number): number | null =>
-      taxRate != null
-        ? Math.round((price + (price * taxRate) / 100) * 100) / 100
-        : null;
+      computePriceWithTax(price, taxRate);
 
     const variants = p.variants ?? [];
     const defaultVariant = variants[0];
@@ -125,6 +130,7 @@ export class CartService {
         ...v,
         price: vPrice,
         priceWithTax: withTax(vPrice),
+        taxAmount: computeTaxAmount(vPrice, taxRate),
         compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
         costPrice: v.costPrice != null ? Number(v.costPrice) : null,
         weight: v.weight != null ? Number(v.weight) : null,
@@ -147,6 +153,7 @@ export class CartService {
       ...p,
       price,
       priceWithTax: withTax(price),
+      taxAmount: computeTaxAmount(price, taxRate),
       compareAtPrice: defaultVariant?.compareAtPrice
         ? Number(defaultVariant.compareAtPrice)
         : null,
@@ -217,10 +224,14 @@ export class CartService {
           it.product?.tax?.rate != null
             ? Number(it.product.tax.rate)
             : null;
-        const variantPriceWithTax =
-          taxRate != null
-            ? Math.round((unitPriceCurrent + (unitPriceCurrent * taxRate) / 100) * 100) / 100
-            : null;
+        const variantPriceWithTax = computePriceWithTax(
+          unitPriceCurrent,
+          taxRate,
+        );
+        const unitTax = computeTaxAmount(unitPriceCurrent, taxRate);
+        // Per-line GST = unit tax × quantity (display-only; checkout recomputes).
+        const lineTaxAmount =
+          unitTax != null ? Math.round(unitTax * it.quantity * 100) / 100 : null;
 
         return {
           ...it,
@@ -228,6 +239,7 @@ export class CartService {
           unitPriceCurrent,
           priceChanged,
           lineTotal,
+          taxAmount: lineTaxAmount,
           availableQuantity: available,
           stockState,
           variant: it.variant
@@ -235,6 +247,7 @@ export class CartService {
                 ...it.variant,
                 price: unitPriceCurrent,
                 priceWithTax: variantPriceWithTax,
+                taxAmount: unitTax,
                 attributes: flattenedAttrs,
               }
             : null,

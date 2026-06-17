@@ -56,6 +56,14 @@ model Product {
   /// code. Required for tax-invoice issuance. Validated as digits-only at
   /// the DTO layer; stored as string to preserve leading zeros.
   hsnCode          String?
+  /// ISO 3166-1 alpha-2 country code. Required for ACTIVE status per
+  /// Consumer Protection (E-Commerce) Rules 2020. Default "IN" for
+  /// historical rows via migration backfill.
+  countryOfOrigin  String?       @db.Char(2)
+  /// True = stored prices (Product.basePrice, ProductVariant.price) are MRP
+  /// inclusive of GST + cess. False = stored prices are exclusive; GST adds
+  /// on top at checkout. Default true to match Indian retail convention.
+  isPriceTaxInclusive Boolean    @default(true)
   seoTitle         String?
   seoDescription   String?
   seoKeywords      String[]
@@ -65,6 +73,20 @@ model Product {
   metadata         Json          @default("{}")
   /// Cached lowest variant price for fast database sorting (Phase B optimization)
   basePrice        Decimal?      @db.Decimal(10, 2)
+
+  /// Denormalized "is on sale" flag = any active variant has
+  /// compareAtPrice > price. Maintained alongside basePrice (column-vs-column
+  /// comparisons can't live in a Prisma `where`, so smart-collection rules +
+  /// the "sale" auto-label query this boolean instead).
+  onSale           Boolean       @default(false)
+
+  /// Sales-velocity stats — refreshed by the sales-stats cron job from
+  /// OrderItem aggregation over trailing windows. Power the data-driven
+  /// "Bestseller" / "Trending" auto-labels and smart-collection rules.
+  unitsSold7d      Int           @default(0)
+  unitsSold30d     Int           @default(0)
+  lastSoldAt       DateTime?
+
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   deletedAt        DateTime?
@@ -77,6 +99,8 @@ model Product {
   variants      ProductVariant[]
   readDocument  ProductReadDocument?
   tags          Tag[]                @relation("ProductTags")
+  labels        Label[]              @relation("ProductLabels")
+  collections   Collection[]         @relation("CollectionProducts")
   wishlistItems WishlistItem[]
   cartItems     CartItem[]
   orderItems    OrderItem[]
@@ -85,6 +109,7 @@ model Product {
   @@index([storeId, status])
   @@index([brandId])
   @@index([categoryId])
+  @@index([unitsSold30d])
 }
 
 model ProductImage {

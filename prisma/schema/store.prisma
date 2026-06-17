@@ -19,6 +19,12 @@ model Store {
   currencyCode   String      @default("INR")
   timezone       String      @default("Asia/Kolkata")
   locale         String      @default("en-IN")
+
+  // Optional state override. When a seller operates stores registered in
+  // different states (separate GSTIN per state), each store carries its own.
+  // Falls back to Seller.stateCode in place-of-supply determination if null.
+  stateCode      String?     @db.Char(2)
+  stateName      String?
   supportEmail   String?
   supportPhone   String?
   themeConfig    Json        @default("{}")
@@ -62,6 +68,9 @@ model Warehouse {
   postalCode   String
   countryCode  String    @default("IN")
   phone        String?
+  /// Cached pickup-location id from the courier provider (e.g. Shiprocket
+  /// `addpickup`) so we don't re-register on every shipment.
+  providerLocationId String?
   isDefault    Boolean   @default(false)
   isActive     Boolean   @default(true)
   metadata     Json      @default("{}")

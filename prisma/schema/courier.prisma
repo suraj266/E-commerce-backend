@@ -1,0 +1,89 @@
+/// Courier / shipping-aggregator integration (Phase B).
+///
+/// Multi-provider by design: `CourierProvider` selects the concrete adapter
+/// (Shiprocket first; MOCK for credential-free verification). Accounts are
+/// PER-SELLER — each seller connects their own courier account (own wallet /
+/// COD remittance), so credentials + the cached auth token live here, keyed by
+/// sellerId. The in-house flat-rate engine (Store.shippingConfig) remains the
+/// fallback when a seller has no enabled account or a live call fails.
+
+enum CourierProvider {
+  SHIPROCKET
+  /// Deterministic stub for end-to-end verification without real credentials.
+  MOCK
+}
+
+enum CourierAccountStatus {
+  /// Created but not yet validated by a successful test connection.
+  PENDING
+  /// Test connection (login) succeeded; usable for live rates + fulfillment.
+  CONNECTED
+  /// Last call failed auth — needs the seller to re-enter credentials.
+  ERROR
+  /// Seller turned it off; falls back to the in-house engine.
+  DISABLED
+}
+
+/// One per (seller, provider). Holds AES-256-GCM-encrypted credentials + the
+/// cached bearer token (Shiprocket token TTL ~10 days, no refresh endpoint, so
+/// it is re-minted by logging in again when near expiry).
+model CourierAccount {
+  id       String          @id @default(uuid())
+  sellerId String
+  /// Reserved for sellers operating per-store under separate GSTINs. Null =
+  /// seller-wide. The unique key treats null as a distinct value.
+  storeId  String?
+  provider CourierProvider
+
+  /// Encrypted JSON, e.g. { email, password } for Shiprocket.
+  credentials String @default("")
+  /// Encrypted cached bearer token + its expiry.
+  encryptedToken String?
+  tokenExpiresAt DateTime?
+
+  /// Default Shiprocket pickup-location nickname + the provider's id for it.
+  pickupLocationNickname String?
+  providerLocationId     String?
+
+  /// Static token the provider sends as `x-api-key` on tracking webhooks
+  /// (configured in the seller's courier panel). Used to authenticate webhooks.
+  webhookSecret String?
+
+  isEnabled    Boolean              @default(false)
+  status       CourierAccountStatus @default(PENDING)
+  lastError    String?
+  lastTestedAt DateTime?
+
+  metadata  Json      @default("{}")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@unique([sellerId, provider, storeId])
+  @@index([sellerId, isEnabled])
+  @@index([webhookSecret])
+}
+
+/// Audit + idempotency log for inbound courier tracking webhooks (and the cron
+/// backstop). `dedupeKey` guarantees a given scan event is processed once.
+model CourierWebhookLog {
+  id               String          @id @default(uuid())
+  provider         CourierProvider
+  /// Resolved correlation (null if the event couldn't be matched to an order).
+  sellerOrderId    String?
+  awbCode          String?
+  providerOrderId  String?
+  rawStatusCode    String?
+  normalizedStatus String?
+  /// awb|statusCode|scanTime (or a provider event id) — unique → process-once.
+  dedupeKey        String          @unique
+  signatureValid   Boolean         @default(false)
+  payload          Json            @default("{}")
+  processedAt      DateTime?
+  createdAt        DateTime        @default(now())
+
+  @@index([sellerOrderId])
+  @@index([awbCode])
+}

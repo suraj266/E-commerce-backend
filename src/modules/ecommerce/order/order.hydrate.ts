@@ -43,6 +43,18 @@ export function hydrateOrderItem(it: PrismaOrderItem) {
     totalPrice: Number(it.totalPrice),
     taxAmount: Number(it.taxAmount),
     discountAmount: Number(it.discountAmount),
+    // Phase 1 compliance + tax-split fields. All four-decimal Decimal columns
+    // collapse to plain number for GraphQL — JSON can't carry arbitrary
+    // precision and 4 dp survives the round-trip.
+    taxableValue: Number((it as Any).taxableValue ?? 0),
+    cgstRate: Number((it as Any).cgstRate ?? 0),
+    cgstAmount: Number((it as Any).cgstAmount ?? 0),
+    sgstRate: Number((it as Any).sgstRate ?? 0),
+    sgstAmount: Number((it as Any).sgstAmount ?? 0),
+    igstRate: Number((it as Any).igstRate ?? 0),
+    igstAmount: Number((it as Any).igstAmount ?? 0),
+    cessRate: Number((it as Any).cessRate ?? 0),
+    cessAmount: Number((it as Any).cessAmount ?? 0),
     attributesSnapshot: Array.isArray(it.attributesSnapshot)
       ? (it.attributesSnapshot as Any[]).map((a) => ({
           attributeName: String(a?.attributeName ?? ''),
@@ -77,6 +89,8 @@ export function hydrateSellerOrder(so: Any) {
     discountAmount: Number(so.discountAmount),
     commissionAmount: Number(so.commissionAmount),
     payoutAmount: Number(so.payoutAmount),
+    quotedShippingRate: so.quotedShippingRate != null ? Number(so.quotedShippingRate) : null,
+    billableWeightKg: so.billableWeightKg != null ? Number(so.billableWeightKg) : null,
     items,
     itemCount: items.reduce((s: number, i: Any) => s + (i.quantity ?? 0), 0),
     storeName: so.store?.name ?? null,

@@ -13,6 +13,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -24,6 +25,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { OrderPlacementService } from '../order/order-placement.service';
+import { OrderService } from '../order/order.service';
 import { PaymentConfigService } from './payment-config.service';
 import {
   PAYMENT_GATEWAY_MAP,
@@ -31,16 +33,71 @@ import {
 } from './gateways/payment-gateway.interface';
 import { InitiateCheckoutInput } from './dto/initiate-checkout.input';
 import { VerifyPaymentInput } from './dto/verify-payment.input';
+import { InvoiceService } from '../invoice/invoice.service';
 
 @Injectable()
 export class PaymentService {
+  private readonly logger = new Logger(PaymentService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly placement: OrderPlacementService,
+    private readonly orderService: OrderService,
     private readonly configService: PaymentConfigService,
     @Inject(PAYMENT_GATEWAY_MAP)
     private readonly gatewayMap: Map<string, IPaymentGateway>,
+    private readonly invoice: InvoiceService,
   ) {}
+
+  /**
+   * Empties the buyer's cart after a PREPAID payment is captured. Prepaid
+   * orders intentionally keep the cart until payment succeeds (so a cancelled
+   * payment leaves it intact for retry — see order-placement step f), so we
+   * clear it here. Fire-and-forget; a missed clear is a tolerable degradation.
+   */
+  private clearCartForOrder(orderId: string): void {
+    this.prisma.order
+      .findUnique({ where: { id: orderId }, select: { customerId: true } })
+      .then((order) => {
+        if (!order) return;
+        return this.prisma.cart
+          .findUnique({ where: { customerId: order.customerId }, select: { id: true } })
+          .then((cart) => {
+            if (!cart) return;
+            return this.prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+          });
+      })
+      .catch((err) =>
+        this.logger.warn(
+          `Cart clear after payment for order ${orderId} failed: ${(err as Error).message}`,
+        ),
+      );
+  }
+
+  /**
+   * Fire-and-forget invoice generation for every SellerOrder under an
+   * Order. Called after a payment captures successfully (verify or
+   * webhook path). Failures are logged but never block the payment ack
+   * — the admin can regenerate via UI if a render fails.
+   */
+  private generateInvoicesForOrder(orderId: string): void {
+    this.prisma.sellerOrder
+      .findMany({ where: { orderId }, select: { id: true } })
+      .then((sellerOrders) => {
+        for (const so of sellerOrders) {
+          this.invoice.generateForSellerOrder(so.id).catch((err) => {
+            this.logger.error(
+              `Invoice generation failed for seller-order ${so.id}: ${(err as Error).message}`,
+            );
+          });
+        }
+      })
+      .catch((err) => {
+        this.logger.error(
+          `Could not list seller orders for ${orderId}: ${(err as Error).message}`,
+        );
+      });
+  }
 
   // ---------------------------------------------------------------------------
   // Customer-facing
@@ -89,6 +146,7 @@ export class PaymentService {
       paymentMethod: orderPaymentMethod,
       customerNotes: input.customerNotes,
       couponCode: input.couponCode,
+      buyerGstin: input.buyerGstin,
     }, paymentStatus);
 
     // Calculate processing fee
@@ -190,7 +248,7 @@ export class PaymentService {
       throw new BadRequestException('Payment verification failed.');
     }
 
-    // Update payment + order
+    // Update payment + order (+ sub-orders so the seller view reflects PAID)
     await this.prisma.$transaction([
       this.prisma.payment.update({
         where: { id: payment.id },
@@ -205,7 +263,18 @@ export class PaymentService {
         where: { id: input.orderId },
         data: { paymentStatus: PaymentStatus.PAID },
       }),
+      this.prisma.sellerOrder.updateMany({
+        where: { orderId: input.orderId },
+        data: { paymentStatus: PaymentStatus.PAID },
+      }),
     ]);
+
+    // Phase 1: payment captured → generate the tax invoice per
+    // SellerOrder. Fire-and-forget; failures are logged but never
+    // delay returning the success ack to the customer.
+    this.generateInvoicesForOrder(input.orderId);
+    // Prepaid cart is cleared on capture (not at placement).
+    this.clearCartForOrder(input.orderId);
 
     return this.prisma.order.findUnique({ where: { id: input.orderId } });
   }
@@ -268,7 +337,13 @@ export class PaymentService {
           where: { id: payment.orderId },
           data: { paymentStatus: PaymentStatus.PAID },
         }),
+        this.prisma.sellerOrder.updateMany({
+          where: { orderId: payment.orderId },
+          data: { paymentStatus: PaymentStatus.PAID },
+        }),
       ]);
+      this.generateInvoicesForOrder(payment.orderId);
+      this.clearCartForOrder(payment.orderId);
     } else if (event === 'payment.failed') {
       await this.prisma.payment.update({
         where: { id: payment.id },
@@ -279,7 +354,65 @@ export class PaymentService {
           failedAt: new Date(),
         },
       });
+      // A prepaid order whose payment failed must not linger as a
+      // seller-actionable PENDING order. Cancel it (releasing reserved stock)
+      // unless it's COD (no upfront payment) or already paid (race). The
+      // cancel is idempotent, so a frontend cancelCheckout + this webhook
+      // firing both is safe.
+      await this.orderService
+        .cancelForPaymentFailure(payment.orderId, 'Payment failed at gateway')
+        .catch((err) =>
+          this.logger.error(
+            `Auto-cancel after payment.failed for order ${payment.orderId} failed: ${(err as Error).message}`,
+          ),
+        );
     }
+  }
+
+  /**
+   * Phase 2 (frontend): the customer dismissed the gateway modal without
+   * paying. Cancels the prepaid order (releasing reserved stock) with the
+   * reason "Payment cancelled by customer". Idempotent + race-safe: if the
+   * payment was actually captured (webhook landed first) we DON'T cancel — we
+   * return the order untouched so a paid order is never voided.
+   */
+  async cancelCheckout(userId: string, orderId: string) {
+    const customerId = await this.getCustomerId(userId);
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+    });
+    if (!order) throw new NotFoundException('Order not found.');
+    if (order.customerId !== customerId) {
+      throw new ForbiddenException('You do not own this order.');
+    }
+
+    // Race guard: payment already captured → leave the order as-is.
+    if (order.paymentStatus === PaymentStatus.PAID) {
+      return order;
+    }
+
+    // Mark the latest payment attempt FAILED (PaymentTransactionStatus has no
+    // CANCELLED value, so FAILED doubles for "customer dismissed").
+    const payment = await this.prisma.payment.findFirst({
+      where: { orderId },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (payment && payment.status === PaymentTransactionStatus.CAPTURED) {
+      // Captured between the dismiss and this call — don't cancel.
+      return order;
+    }
+    if (payment && payment.status === PaymentTransactionStatus.CREATED) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: { status: PaymentTransactionStatus.FAILED, failedAt: new Date() },
+      });
+    }
+
+    await this.orderService.cancelForPaymentFailure(
+      orderId,
+      'Payment cancelled by customer',
+    );
+    return this.prisma.order.findUnique({ where: { id: orderId } });
   }
 
   // ---------------------------------------------------------------------------

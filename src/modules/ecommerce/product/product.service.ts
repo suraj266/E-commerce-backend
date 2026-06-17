@@ -6,6 +6,10 @@ import {
 } from '@nestjs/common';
 import { Prisma, ProductStatus, ProductType } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
+import {
+  computePriceWithTax,
+  computeTaxAmount,
+} from '@/common/pricing/price-with-tax.util';
 import { CreateProductInput } from './dto/create-product.input';
 import { UpdateProductInput } from './dto/update-product.input';
 import { SetProductStatusInput } from './dto/set-product-status.input';
@@ -22,6 +26,10 @@ import { UpdateVariantInput } from './dto/update-variant.input';
 import { BulkUpdateVariantsInput } from './dto/bulk-update-variants.input';
 import { VariantStatus } from '@prisma/client';
 import { InventoryService } from '@/modules/ecommerce/inventory/inventory.service';
+import {
+  ruleToPrismaWhere,
+  validateRuleSet,
+} from '@/modules/ecommerce/catalog-rules/rule-engine';
 
 const PRODUCT_INCLUDE = {
   images: { orderBy: { displayOrder: 'asc' as const } },
@@ -29,6 +37,9 @@ const PRODUCT_INCLUDE = {
   category: true,
   tax: true,
   tags: true,
+  // Manual label assignments (enabled only). AUTO labels are derived in the
+  // `labels` resolve-field, not stored here.
+  labels: { where: { deletedAt: null, isEnabled: true } },
   variants: {
     where: { deletedAt: null },
     orderBy: { createdAt: 'asc' as const },
@@ -53,6 +64,9 @@ function hydrate(p: any) {
   // Format each variant the same way the variant resolver does — converts
   // Decimal → number, formats the attribute junction, etc.
   const taxRate = p.tax?.rate != null ? Number(p.tax.rate) : null;
+  // The stored price is always the pre-tax BASE; `priceWithTax` adds GST on top
+  // and `taxAmount` is the GST portion alone. The `show_price_with_tax` setting
+  // only decides which of price / priceWithTax the storefront displays.
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const formattedVariants = variants.map((v: any) => {
@@ -60,8 +74,8 @@ function hydrate(p: any) {
     return {
       ...v,
       price: vPrice,
-      priceWithTax:
-        taxRate != null ? Math.round((vPrice + vPrice * taxRate / 100) * 100) / 100 : null,
+      priceWithTax: computePriceWithTax(vPrice, taxRate),
+      taxAmount: computeTaxAmount(vPrice, taxRate),
       compareAtPrice: v.compareAtPrice != null ? Number(v.compareAtPrice) : null,
       costPrice: v.costPrice != null ? Number(v.costPrice) : null,
       weight: v.weight != null ? Number(v.weight) : null,
@@ -107,15 +121,14 @@ function hydrate(p: any) {
     sku = defaultVariant.sku ?? null;
   }
 
-  const priceWithTax =
-    price != null && taxRate != null
-      ? Math.round((price + price * taxRate / 100) * 100) / 100
-      : null;
+  const priceWithTax = computePriceWithTax(price, taxRate);
+  const taxAmount = computeTaxAmount(price, taxRate);
 
   return {
     ...p,
     price,
     priceWithTax,
+    taxAmount,
     compareAtPrice,
     costPrice,
     sku,
@@ -222,17 +235,17 @@ export class ProductService {
   private async syncBasePrice(productId: string, tx?: Prisma.TransactionClient) {
     const client = tx || this.prisma;
 
-    // Find all active variants
+    // Find all active variants (price + compareAtPrice for the onSale flag)
     const variants = await client.productVariant.findMany({
       where: { productId, deletedAt: null },
-      select: { price: true },
+      select: { price: true, compareAtPrice: true },
     });
 
     if (variants.length === 0) {
-      // If no variants, clear basePrice
+      // If no variants, clear basePrice + onSale
       await client.product.update({
         where: { id: productId },
-        data: { basePrice: null },
+        data: { basePrice: null, onSale: false },
       });
       return;
     }
@@ -243,9 +256,16 @@ export class ProductService {
       return p < min ? p : min;
     }, Number(variants[0].price));
 
+    // Denormalized onSale = any active variant has compareAtPrice > price.
+    // Drives the "sale" auto-label + smart-collection rules (column-vs-column
+    // comparisons can't live in a Prisma `where`).
+    const onSale = variants.some(
+      (v) => v.compareAtPrice != null && Number(v.compareAtPrice) > Number(v.price),
+    );
+
     await client.product.update({
       where: { id: productId },
-      data: { basePrice: minPrice },
+      data: { basePrice: minPrice, onSale },
     });
   }
 
@@ -267,6 +287,24 @@ export class ProductService {
       select: { id: true },
     });
     return tags.map((t) => t.id);
+  }
+
+  /**
+   * Only MANUAL, enabled labels can be hand-assigned to a product. AUTO labels
+   * are rule-derived and silently dropped if a client sends them.
+   */
+  private async filterValidLabelIds(labelIds?: string[] | null) {
+    if (!labelIds || labelIds.length === 0) return [];
+    const labels = await this.prisma.label.findMany({
+      where: {
+        id: { in: labelIds },
+        deletedAt: null,
+        isEnabled: true,
+        type: 'MANUAL',
+      },
+      select: { id: true },
+    });
+    return labels.map((l) => l.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -293,6 +331,7 @@ export class ProductService {
   ) {
     await this.validateBrand(input.brandId);
     const validTagIds = await this.filterValidTagIds(input.tagIds);
+    const validLabelIds = await this.filterValidLabelIds(input.labelIds);
 
     const productType = input.productType ?? ProductType.SIMPLE;
 
@@ -335,12 +374,15 @@ export class ProductService {
           width: input.width,
           height: input.height,
           hsnCode: input.hsnCode,
+          countryOfOrigin: input.countryOfOrigin?.toUpperCase(),
+          isPriceTaxInclusive: input.isPriceTaxInclusive ?? true,
           seoTitle: input.seoTitle,
           seoDescription: input.seoDescription,
           seoKeywords: input.seoKeywords ?? [],
           specifications: specsJson,
           metadata: { currencyCode: store.currencyCode },
           tags: { connect: validTagIds.map((id) => ({ id })) },
+          labels: { connect: validLabelIds.map((id) => ({ id })) },
         },
       });
 
@@ -364,7 +406,12 @@ export class ProductService {
         );
         await tx.product.update({
           where: { id: product.id },
-          data: { basePrice: input.price! },
+          data: {
+            basePrice: input.price!,
+            onSale:
+              input.compareAtPrice != null &&
+              input.compareAtPrice > input.price!,
+          },
         });
       }
 
@@ -416,6 +463,10 @@ export class ProductService {
       input.tagIds !== undefined
         ? await this.filterValidTagIds(input.tagIds)
         : null;
+    const validLabelIds =
+      input.labelIds !== undefined
+        ? await this.filterValidLabelIds(input.labelIds)
+        : null;
 
     const slugChange =
       input.slug && input.slug !== product.slug
@@ -463,6 +514,12 @@ export class ProductService {
       ...(input.width !== undefined ? { width: input.width } : {}),
       ...(input.height !== undefined ? { height: input.height } : {}),
       ...(input.hsnCode !== undefined ? { hsnCode: input.hsnCode } : {}),
+      ...(input.countryOfOrigin !== undefined
+        ? { countryOfOrigin: input.countryOfOrigin?.toUpperCase() }
+        : {}),
+      ...(input.isPriceTaxInclusive !== undefined
+        ? { isPriceTaxInclusive: input.isPriceTaxInclusive }
+        : {}),
       ...(input.seoTitle !== undefined ? { seoTitle: input.seoTitle } : {}),
       ...(input.seoDescription !== undefined
         ? { seoDescription: input.seoDescription }
@@ -471,6 +528,9 @@ export class ProductService {
       ...(specsJson !== undefined ? { specifications: specsJson } : {}),
       ...(validTagIds !== null
         ? { tags: { set: validTagIds.map((id) => ({ id })) } }
+        : {}),
+      ...(validLabelIds !== null
+        ? { labels: { set: validLabelIds.map((id) => ({ id })) } }
         : {}),
     };
 
@@ -553,22 +613,7 @@ export class ProductService {
     }
 
     if (input.status === ProductStatus.ACTIVE) {
-      const [imageCount, variant] = await Promise.all([
-        this.prisma.productImage.count({ where: { productId: product.id } }),
-        this.prisma.productVariant.findFirst({
-          where: { productId: product.id, deletedAt: null },
-        }),
-      ]);
-      if (imageCount === 0) {
-        throw new BadRequestException(
-          'Add at least one image before publishing.',
-        );
-      }
-      if (!variant || Number(variant.price) <= 0) {
-        throw new BadRequestException(
-          'Set a price greater than 0 before publishing.',
-        );
-      }
+      await this.assertReadyToPublish(product.id);
     }
 
     await this.prisma.product.update({
@@ -576,6 +621,60 @@ export class ProductService {
       data: { status: input.status },
     });
     return this.findOneById(product.id);
+  }
+
+  /**
+   * Tax-invoice readiness check. Run before any DRAFT → ACTIVE transition.
+   *
+   * All gates here are required by Indian GST law / Consumer Protection
+   * (E-Commerce) Rules 2020 so we treat them as hard blocks rather than
+   * warnings. Each error is phrased so the seller can deeplink to the
+   * specific field that needs fixing.
+   */
+  private async assertReadyToPublish(productId: string): Promise<void> {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: {
+        hsnCode: true,
+        countryOfOrigin: true,
+        taxId: true,
+      },
+    });
+    if (!product) {
+      throw new NotFoundException(`Product ${productId} not found`);
+    }
+    if (!product.hsnCode) {
+      throw new BadRequestException(
+        'HSN code is required to publish a product. Add it under "Tax & Compliance".',
+      );
+    }
+    if (!product.countryOfOrigin) {
+      throw new BadRequestException(
+        'Country of origin is required to publish a product (Consumer Protection Rules 2020).',
+      );
+    }
+    if (!product.taxId) {
+      throw new BadRequestException(
+        'Tax class is required to publish a product.',
+      );
+    }
+
+    const [imageCount, variant] = await Promise.all([
+      this.prisma.productImage.count({ where: { productId } }),
+      this.prisma.productVariant.findFirst({
+        where: { productId, deletedAt: null },
+      }),
+    ]);
+    if (imageCount === 0) {
+      throw new BadRequestException(
+        'Add at least one image before publishing.',
+      );
+    }
+    if (!variant || Number(variant.price) <= 0) {
+      throw new BadRequestException(
+        'Set a price greater than 0 before publishing.',
+      );
+    }
   }
 
   async adminSetStatus(input: SetProductStatusInput) {
@@ -760,11 +859,38 @@ export class ProductService {
     return [...ids];
   }
 
+  /**
+   * Resolve a collection slug into a Product `where` fragment:
+   *   - MANUAL → products in the collection's junction.
+   *   - SMART  → products matching the collection's rule (shared engine).
+   * Returns a never-match filter when the collection is missing/inactive so a
+   * bad slug yields an empty grid rather than the whole catalog.
+   */
+  private async buildCollectionFilter(
+    slug: string,
+  ): Promise<Prisma.ProductWhereInput> {
+    const collection = await this.prisma.collection.findUnique({
+      where: { slug },
+    });
+    if (!collection || collection.deletedAt || collection.status !== 'ACTIVE') {
+      return { id: { equals: '00000000-0000-0000-0000-000000000000' } };
+    }
+    if (collection.type === 'SMART') {
+      try {
+        return ruleToPrismaWhere(validateRuleSet(collection.rule));
+      } catch {
+        return { id: { equals: '00000000-0000-0000-0000-000000000000' } };
+      }
+    }
+    return { collections: { some: { slug } } };
+  }
+
   async findPaginatedPublicProducts(filter: {
     storeSlug?: string;
     brandSlug?: string;
     tagSlug?: string;
     categorySlug?: string;
+    collectionSlug?: string;
     minPrice?: number;
     maxPrice?: number;
     sort?: ProductSortOrder;
@@ -798,6 +924,11 @@ export class ProductService {
     // (Falls back to exact-slug match if the lookup fails for any reason.)
     const categoryFilter = filter.categorySlug
       ? await this.buildCategoryDescendantFilter(filter.categorySlug)
+      : null;
+
+    // Collection membership (manual junction OR smart rule).
+    const collectionFilter = filter.collectionSlug
+      ? await this.buildCollectionFilter(filter.collectionSlug)
       : null;
 
     // Free-text — only kicks in when the query is non-empty after trim.
@@ -836,7 +967,11 @@ export class ProductService {
       ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
       ...(filter.tagSlug ? { tags: { some: { slug: filter.tagSlug } } } : {}),
       ...(hasPriceFilter ? { variants: { some: priceVariantFilter } } : {}),
-      ...(searchFilter ? { AND: [searchFilter] } : {}),
+      // searchFilter + collectionFilter both merged under AND so a smart
+      // collection's own AND/OR rule doesn't collide with the search OR.
+      ...((searchFilter || collectionFilter)
+        ? { AND: [searchFilter, collectionFilter].filter(Boolean) as Prisma.ProductWhereInput[] }
+        : {}),
     };
 
     // Order determines how we slice.
@@ -955,10 +1090,15 @@ export class ProductService {
     brandSlug?: string;
     tagSlug?: string;
     categorySlug?: string;
+    collectionSlug?: string;
     sort?: ProductSortOrder;
     limit?: number;
   }) {
     const limit = Math.min(Math.max(filter.limit ?? 20, 1), 100);
+
+    const collectionFilter = filter.collectionSlug
+      ? await this.buildCollectionFilter(filter.collectionSlug)
+      : null;
 
     const where: Prisma.ProductWhereInput = {
       deletedAt: null,
@@ -970,6 +1110,7 @@ export class ProductService {
       ...(filter.brandSlug ? { brand: { slug: filter.brandSlug } } : {}),
       ...(filter.categorySlug ? { category: { slug: filter.categorySlug } } : {}),
       ...(filter.tagSlug ? { tags: { some: { slug: filter.tagSlug } } } : {}),
+      ...(collectionFilter ? { AND: [collectionFilter] } : {}),
     };
 
     // Sort — for price sorts we order by the first variant's price. Prisma
@@ -1467,6 +1608,10 @@ export class ProductService {
         compareAtPrice: input.compareAtPrice,
         costPrice: input.costPrice,
         imageUrl: input.imageUrl,
+        weight: input.weight,
+        length: input.length,
+        width: input.width,
+        height: input.height,
         attributes: {
           create: input.attributeValueIds.map((vid) => ({
             attributeId: values.find((v) => v.id === vid)!.attributeId,
@@ -1504,6 +1649,10 @@ export class ProductService {
       ...(input.costPrice !== undefined ? { costPrice: input.costPrice } : {}),
       ...(input.imageUrl !== undefined ? { imageUrl: input.imageUrl } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.weight !== undefined ? { weight: input.weight } : {}),
+      ...(input.length !== undefined ? { length: input.length } : {}),
+      ...(input.width !== undefined ? { width: input.width } : {}),
+      ...(input.height !== undefined ? { height: input.height } : {}),
     };
     if (input.sku && input.sku !== variant.sku) {
       data.sku = await this.ensureUniqueSku(input.sku, variant.id);

@@ -32,7 +32,7 @@ import { UpdateCouponInput } from './dto/update-coupon.input';
 
 export interface CartLineForValidation {
   storeId: string;
-  /** Line total = unitPrice * quantity, pre-tax + pre-discount. */
+  /** Pre-tax base line total = unitPrice * quantity. GST is added on top. */
   lineTotal: number;
   /**
    * GST rate as a percentage (e.g. 18 for 18% GST). 0 / null when the product
@@ -41,6 +41,12 @@ export interface CartLineForValidation {
    * taxable value per CGST Act §15(3)(a).
    */
   taxRate?: number | null;
+  /**
+   * Legacy snapshot flag — no longer affects coupon math (the stored price is
+   * always treated as the pre-tax base; GST is always added on top). Kept for
+   * backward compatibility with callers that still pass it.
+   */
+  priceTaxInclusive?: boolean;
 }
 
 export interface ValidateAndComputeArgs {
@@ -260,11 +266,14 @@ export class CouponService {
     const subtotal = round2(
       args.cartLines.reduce((s, l) => s + l.lineTotal, 0),
     );
+    // lineTotal is the pre-tax base; GST is always added on top to get the
+    // customer-facing inclusive total (matches placement, which charges
+    // base + tax universally).
     const subtotalInclTax = round2(
-      args.cartLines.reduce(
-        (s, l) => s + l.lineTotal * (1 + (Number(l.taxRate ?? 0) || 0) / 100),
-        0,
-      ),
+      args.cartLines.reduce((s, l) => {
+        const rate = Number(l.taxRate ?? 0) || 0;
+        return s + l.lineTotal * (1 + rate / 100);
+      }, 0),
     );
 
     if (!codeUpper) {
@@ -421,10 +430,11 @@ export class CouponService {
       } else {
         lineDiscount = 0;
       }
+      // lineTotal is the pre-tax base: the customer pays the discounted base
+      // plus GST on the discounted base (matches placement).
       const taxRate = Number(l.taxRate ?? 0) || 0;
-      const taxableValue = Math.max(0, l.lineTotal - lineDiscount);
-      const lineTax = (taxableValue * taxRate) / 100;
-      customerTotal += taxableValue + lineTax;
+      const netLine = Math.max(0, l.lineTotal - lineDiscount);
+      customerTotal += netLine + (netLine * taxRate) / 100;
     }
     customerTotal = round2(customerTotal);
     const discountInclTax = round2(subtotalInclTax - customerTotal);

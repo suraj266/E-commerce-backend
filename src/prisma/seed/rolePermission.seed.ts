@@ -114,6 +114,18 @@ const permissions = [
     { module: "review", action: "moderate", description: "Approve or reject pending reviews" },
     // Admin Dashboard
     { module: "dashboard", action: "read", description: "Read admin dashboard metrics (revenue, orders, users, sellers, recent orders)" },
+    // Invoices (Phase 1 — admin can force-regenerate a tax invoice PDF)
+    { module: "invoice", action: "manage", description: "Regenerate seller-order tax invoices (admin override)" },
+    // Labels (product badges — manual + auto/rule-based)
+    { module: "label", action: "read", description: "Read product labels" },
+    { module: "label", action: "create", description: "Create product label" },
+    { module: "label", action: "update", description: "Update product label (incl. AUTO rule)" },
+    { module: "label", action: "delete", description: "Delete product label" },
+    // Collections (product groupings — manual + smart/rule-based)
+    { module: "collection", action: "read", description: "Read collections" },
+    { module: "collection", action: "create", description: "Create collection" },
+    { module: "collection", action: "update", description: "Update collection (incl. SMART rule + membership)" },
+    { module: "collection", action: "delete", description: "Delete collection" },
 ]
 
 async function main() {

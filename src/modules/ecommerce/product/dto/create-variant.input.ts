@@ -51,4 +51,30 @@ export class CreateVariantInput {
   @IsOptional()
   @IsString()
   imageUrl?: string;
+
+  // Per-variant shipping dimensions — used for accurate courier package data.
+  // Fall back to the product's values (then a default) when unset.
+  @Field(() => Float, { nullable: true, description: 'Weight in kg' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  weight?: number;
+
+  @Field(() => Float, { nullable: true, description: 'Length in cm' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  length?: number;
+
+  @Field(() => Float, { nullable: true, description: 'Width in cm' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  width?: number;
+
+  @Field(() => Float, { nullable: true, description: 'Height in cm' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  height?: number;
 }

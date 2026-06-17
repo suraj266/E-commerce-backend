@@ -51,6 +51,7 @@ export class CouponCustomerResolver {
             product: {
               select: {
                 storeId: true,
+                isPriceTaxInclusive: true,
                 // Needed so the validation can compute the customer-facing
                 // tax-inclusive total + GST reduction from the discount.
                 tax: { select: { rate: true } },
@@ -77,6 +78,7 @@ export class CouponCustomerResolver {
       storeId: it.product.storeId,
       lineTotal: Number(it.variant.price) * it.quantity,
       taxRate: it.product.tax?.rate != null ? Number(it.product.tax.rate) : null,
+      priceTaxInclusive: it.product.isPriceTaxInclusive !== false,
     }));
 
     const result = await this.service.validateAndCompute({

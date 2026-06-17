@@ -10,6 +10,7 @@
 import { Module } from '@nestjs/common';
 
 import { CryptoService } from '@/common/crypto/crypto.service';
+import { SiteSettingModule } from '@/modules/admin/site-setting/site-setting.module';
 
 import { EmailConfigService } from './email-config.service';
 import { EmailTemplateService } from './email-template.service';
@@ -17,6 +18,7 @@ import { EmailService } from './email.service';
 import { EmailResolver } from './email.resolver';
 
 @Module({
+  imports: [SiteSettingModule],
   providers: [
     CryptoService,
     EmailConfigService,

@@ -37,9 +37,16 @@ export class CartItem {
   priceChanged: boolean;
 
   @Field(() => Float, {
-    description: 'quantity * unitPriceCurrent — what the line costs today.',
+    description: 'quantity * unitPriceCurrent — what the line costs today (pre-tax).',
   })
   lineTotal: number;
+
+  @Field(() => Float, {
+    nullable: true,
+    description:
+      'GST portion for the whole line (unit tax × quantity). Null if the product has no tax. Display-only; checkout recomputes authoritatively.',
+  })
+  taxAmount?: number | null;
 
   @Field(() => Int, {
     description:

@@ -71,6 +71,24 @@ export class CreateSellerInput {
   })
   gstin?: string;
 
+  // Place-of-supply state. Required to graduate to VERIFIED (enforced
+  // at service layer), nullable here so the DRAFT-creation step can
+  // proceed before the seller fills the tax section.
+  @Field(() => String, {
+    nullable: true,
+    description: '2-digit GST state code (e.g. "27" for Maharashtra)',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9]{2}$/, { message: 'stateCode must be 2 digits' })
+  stateCode?: string;
+
+  @Field(() => String, { nullable: true })
+  @IsOptional()
+  @IsString()
+  @Length(2, 100)
+  stateName?: string;
+
   @Field(() => String)
   @IsEmail()
   businessEmail: string;

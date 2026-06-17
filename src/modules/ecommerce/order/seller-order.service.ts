@@ -15,17 +15,27 @@
 import {
   BadRequestException,
   ForbiddenException,
+  forwardRef,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { OrderStatus, Prisma } from '@prisma/client';
+import {
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
+  PayoutStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
 import { config } from '@/common/config/config';
 import { UpdateSellerOrderStatusInput } from './dto/update-seller-order-status.input';
 import { isValidTransition } from './order.helpers';
 import { SELLER_ORDER_INCLUDE, hydrateSellerOrder } from './order.hydrate';
+import { InvoiceService } from '../invoice/invoice.service';
+import { CourierService } from '../courier/courier.service';
 
 const STATUS_TO_TEMPLATE: Partial<Record<OrderStatus, string>> = {
   CONFIRMED: 'order_confirmed',
@@ -35,6 +45,25 @@ const STATUS_TO_TEMPLATE: Partial<Record<OrderStatus, string>> = {
   REFUNDED: 'order_refunded',
 };
 
+// Statuses that count as "earned" revenue for a seller (mirrors the admin
+// dashboard's REVENUE_STATUSES): the order is accepted and money is owed.
+const REVENUE_STATUSES: OrderStatus[] = [
+  OrderStatus.CONFIRMED,
+  OrderStatus.PACKED,
+  OrderStatus.SHIPPED,
+  OrderStatus.DELIVERED,
+];
+
+const MONTH_LABELS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+const changePct = (current: number, previous: number): number => {
+  if (previous === 0) return current === 0 ? 0 : 100;
+  return ((current - previous) / previous) * 100;
+};
+
 @Injectable()
 export class SellerOrderService {
   private readonly logger = new Logger(SellerOrderService.name);
@@ -42,6 +71,9 @@ export class SellerOrderService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
+    private readonly invoice: InvoiceService,
+    @Inject(forwardRef(() => CourierService))
+    private readonly courier: CourierService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -113,6 +145,238 @@ export class SellerOrderService {
     return hydrateSellerOrder(row);
   }
 
+  /**
+   * Admin lookup: returns any SellerOrder by id, regardless of seller.
+   *
+   * RBAC enforcement happens at the resolver via `@Permissions('invoice:manage')`.
+   * Used by the admin invoice-management UI (T15) where staff need to
+   * inspect a seller-order before regenerating its tax invoice.
+   */
+  async adminSellerOrder(sellerOrderId: string) {
+    const row = await this.prisma.sellerOrder.findUnique({
+      where: { id: sellerOrderId },
+      include: SELLER_ORDER_INCLUDE,
+    });
+    if (!row || row.deletedAt) throw new NotFoundException('Order not found');
+    return hydrateSellerOrder(row);
+  }
+
+  /**
+   * Admin paginated list of SellerOrders. Supports an optional filter for
+   * "has-invoice" / "no-invoice" so staff can audit the generation backlog.
+   */
+  async adminSellerOrdersWithInvoices(opts: {
+    page?: number;
+    pageSize?: number;
+    onlyMissingInvoice?: boolean;
+  }) {
+    const page = Math.max(1, opts.page ?? 1);
+    const pageSize = Math.min(50, Math.max(1, opts.pageSize ?? 20));
+
+    const where: Prisma.SellerOrderWhereInput = {
+      deletedAt: null,
+      ...(opts.onlyMissingInvoice
+        ? { invoiceUrl: null, paymentStatus: 'PAID' }
+        : {}),
+    };
+
+    const [rows, totalCount] = await Promise.all([
+      this.prisma.sellerOrder.findMany({
+        where,
+        include: SELLER_ORDER_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.sellerOrder.count({ where }),
+    ]);
+
+    return {
+      items: rows.map(hydrateSellerOrder),
+      totalCount,
+      totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+      currentPage: page,
+      pageSize,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Seller-scoped earnings + sales analytics for the dashboard. Aggregates the
+   * seller's own SellerOrders: net earnings (payout after commission), gross
+   * sales, commission, payout status, order pipeline counts, a 12-month
+   * earnings series, and best-sellers over the last 30 days.
+   */
+  async getMyStats(userId: string) {
+    const sellerId = await this.getSellerId(userId);
+
+    const now = new Date();
+    const currStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const currEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevEnd = currStart;
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const revenueWhere: Prisma.SellerOrderWhereInput = {
+      sellerId,
+      deletedAt: null,
+      status: { in: REVENUE_STATUSES },
+    };
+
+    const [
+      netThisMonth,
+      netLastMonth,
+      lifetimeAgg,
+      grossThisMonth,
+      pendingPayout,
+      paidPayout,
+      ordersThisMonth,
+      ordersLastMonth,
+      lifetimeOrders,
+      statusGroups,
+      monthlyRows,
+      bestSellerItems,
+    ] = await Promise.all([
+      this.prisma.sellerOrder.aggregate({
+        _sum: { payoutAmount: true },
+        where: { ...revenueWhere, createdAt: { gte: currStart, lt: currEnd } },
+      }),
+      this.prisma.sellerOrder.aggregate({
+        _sum: { payoutAmount: true },
+        where: { ...revenueWhere, createdAt: { gte: prevStart, lt: prevEnd } },
+      }),
+      this.prisma.sellerOrder.aggregate({
+        _sum: { payoutAmount: true, commissionAmount: true, subtotal: true },
+        _count: { _all: true },
+        where: revenueWhere,
+      }),
+      this.prisma.sellerOrder.aggregate({
+        _sum: { subtotal: true },
+        where: { ...revenueWhere, createdAt: { gte: currStart, lt: currEnd } },
+      }),
+      this.prisma.sellerOrder.aggregate({
+        _sum: { payoutAmount: true },
+        where: { ...revenueWhere, payoutStatus: PayoutStatus.PENDING },
+      }),
+      this.prisma.sellerOrder.aggregate({
+        _sum: { payoutAmount: true },
+        where: { sellerId, deletedAt: null, payoutStatus: PayoutStatus.PAID },
+      }),
+      this.prisma.sellerOrder.count({
+        where: {
+          sellerId,
+          deletedAt: null,
+          status: { not: OrderStatus.CANCELLED },
+          createdAt: { gte: currStart, lt: currEnd },
+        },
+      }),
+      this.prisma.sellerOrder.count({
+        where: {
+          sellerId,
+          deletedAt: null,
+          status: { not: OrderStatus.CANCELLED },
+          createdAt: { gte: prevStart, lt: prevEnd },
+        },
+      }),
+      this.prisma.sellerOrder.count({
+        where: {
+          sellerId,
+          deletedAt: null,
+          status: { not: OrderStatus.CANCELLED },
+        },
+      }),
+      this.prisma.sellerOrder.groupBy({
+        by: ['status'],
+        where: { sellerId, deletedAt: null },
+        _count: { _all: true },
+      }),
+      this.prisma.sellerOrder.findMany({
+        where: { ...revenueWhere, createdAt: { gte: yearStart } },
+        select: { createdAt: true, payoutAmount: true },
+      }),
+      this.prisma.orderItem.findMany({
+        where: {
+          createdAt: { gte: thirtyDaysAgo },
+          sellerOrder: {
+            sellerId,
+            deletedAt: null,
+            status: { in: REVENUE_STATUSES },
+          },
+        },
+        select: {
+          productId: true,
+          name: true,
+          quantity: true,
+          totalPrice: true,
+        },
+      }),
+    ]);
+
+    // 12-month net-earnings buckets for the current calendar year.
+    const monthlyEarnings = MONTH_LABELS.map((m) => ({ label: m, value: 0 }));
+    for (const r of monthlyRows) {
+      monthlyEarnings[r.createdAt.getMonth()].value += Number(r.payoutAmount);
+    }
+
+    // Pipeline counts by status.
+    const countOf = (s: OrderStatus) =>
+      statusGroups.find((g) => g.status === s)?._count._all ?? 0;
+    const toShipOrders =
+      countOf(OrderStatus.CONFIRMED) + countOf(OrderStatus.PACKED);
+
+    // Best sellers — aggregate snapshotted item rows by product in JS.
+    const bestMap = new Map<
+      string,
+      { name: string; unitsSold: number; revenue: number }
+    >();
+    for (const it of bestSellerItems) {
+      const prev = bestMap.get(it.productId) ?? {
+        name: it.name,
+        unitsSold: 0,
+        revenue: 0,
+      };
+      prev.name = it.name;
+      prev.unitsSold += it.quantity;
+      prev.revenue += Number(it.totalPrice);
+      bestMap.set(it.productId, prev);
+    }
+    const bestSellers = [...bestMap.entries()]
+      .map(([productId, v]) => ({ productId, ...v }))
+      .sort((a, b) => b.unitsSold - a.unitsSold)
+      .slice(0, 5);
+
+    const netThis = Number(netThisMonth._sum.payoutAmount ?? 0);
+    const netLast = Number(netLastMonth._sum.payoutAmount ?? 0);
+    const lifetimeGross = Number(lifetimeAgg._sum.subtotal ?? 0);
+    const lifetimeCount = lifetimeAgg._count._all ?? 0;
+
+    return {
+      netEarningsThisMonth: netThis,
+      netEarningsLastMonth: netLast,
+      netEarningsChangePct: changePct(netThis, netLast),
+      lifetimeNetEarnings: Number(lifetimeAgg._sum.payoutAmount ?? 0),
+      grossSalesThisMonth: Number(grossThisMonth._sum.subtotal ?? 0),
+      lifetimeCommission: Number(lifetimeAgg._sum.commissionAmount ?? 0),
+      pendingPayoutAmount: Number(pendingPayout._sum.payoutAmount ?? 0),
+      paidPayoutAmount: Number(paidPayout._sum.payoutAmount ?? 0),
+      ordersThisMonth,
+      ordersLastMonth,
+      ordersChangePct: changePct(ordersThisMonth, ordersLastMonth),
+      lifetimeOrders,
+      avgOrderValue: lifetimeCount > 0 ? lifetimeGross / lifetimeCount : 0,
+      pendingOrders: countOf(OrderStatus.PENDING),
+      toShipOrders,
+      deliveredOrders: countOf(OrderStatus.DELIVERED),
+      cancelledOrders: countOf(OrderStatus.CANCELLED),
+      monthlyEarnings,
+      bestSellers,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Status transitions
   // ---------------------------------------------------------------------------
@@ -121,6 +385,9 @@ export class SellerOrderService {
     const sellerId = await this.getSellerId(userId);
     const existing = await this.prisma.sellerOrder.findUnique({
       where: { id: input.sellerOrderId },
+      include: {
+        order: { select: { paymentMethod: true, paymentStatus: true } },
+      },
     });
     if (!existing || existing.deletedAt) {
       throw new NotFoundException('Order not found');
@@ -128,16 +395,58 @@ export class SellerOrderService {
     if (existing.sellerId !== sellerId) {
       throw new ForbiddenException('You do not own this order.');
     }
+    // Prepaid payment guard: an order paid via a gateway must have its payment
+    // CAPTURED before the seller can move it forward. The ONLY action allowed
+    // on an unpaid prepaid order is cancellation. COD is exempt (paid on
+    // delivery). This blocks fulfilling an order whose payment was cancelled or
+    // failed — and is the source of truth even if the UI doesn't hide buttons.
+    if (
+      input.status !== OrderStatus.CANCELLED &&
+      existing.order.paymentMethod !== PaymentMethod.COD &&
+      existing.order.paymentStatus !== PaymentStatus.PAID
+    ) {
+      throw new BadRequestException(
+        'Payment is not confirmed for this prepaid order — you cannot proceed until the payment is captured.',
+      );
+    }
     if (!isValidTransition(existing.status, input.status)) {
       throw new BadRequestException(
         `Cannot transition from ${existing.status} to ${input.status}.`,
       );
     }
+    // Capture the pre-transition state so we can fire the COD invoice
+    // trigger AFTER the transaction commits. We deliberately read this
+    // here rather than inside the closure so the trigger only fires
+    // when the seller actually accepted (PENDING → CONFIRMED), not on
+    // arbitrary subsequent edits.
+    const isCodConfirmation =
+      existing.status === OrderStatus.PENDING &&
+      input.status === OrderStatus.CONFIRMED &&
+      !existing.invoiceUrl;
+    // Any PENDING→CONFIRMED pushes the order to the seller's courier dashboard
+    // (two-phase: "New Order" now, courier/AWB chosen later at ship time).
+    const isConfirmation =
+      existing.status === OrderStatus.PENDING && input.status === OrderStatus.CONFIRMED;
 
     const now = new Date();
     const stampPatch: Prisma.SellerOrderUpdateInput = { status: input.status };
     if (input.status === OrderStatus.PACKED) stampPatch.packedAt = now;
-    if (input.status === OrderStatus.SHIPPED) stampPatch.shippedAt = now;
+    if (input.status === OrderStatus.SHIPPED) {
+      // In-house v1: the seller types the courier + tracking number when they
+      // hand the parcel over. Required so the customer gets a usable "track
+      // shipment" link instead of the old hardcoded "Pending".
+      if (!input.trackingNumber || !input.trackingNumber.trim()) {
+        throw new BadRequestException(
+          'A tracking number is required to mark the order as shipped.',
+        );
+      }
+      stampPatch.shippedAt = now;
+      stampPatch.dispatchedAt = now;
+      stampPatch.trackingNumber = input.trackingNumber.trim();
+      if (input.carrier) stampPatch.carrier = input.carrier.trim();
+      if (input.trackingUrl) stampPatch.trackingUrl = input.trackingUrl.trim();
+      if (input.expectedDeliveryAt) stampPatch.expectedDeliveryAt = input.expectedDeliveryAt;
+    }
     if (input.status === OrderStatus.DELIVERED) stampPatch.deliveredAt = now;
     if (input.status === OrderStatus.CANCELLED) stampPatch.cancelledAt = now;
 
@@ -301,7 +610,127 @@ export class SellerOrderService {
         ),
     );
 
+    // COD flow: invoice generates when the seller actually confirms (and
+    // accepts) the order. Online payments fire the invoice in
+    // PaymentService.verifyPayment / webhook captured branch.
+    if (isCodConfirmation) {
+      this.invoice.generateForSellerOrder(existing.id).catch((err) =>
+        this.logger.warn(
+          `Invoice generation failed on COD confirm for ${existing.id}: ${(err as Error).message}`,
+        ),
+      );
+    }
+
+    // Push to the courier dashboard on confirm (fire-and-forget; never throws).
+    if (isConfirmation) {
+      void this.courier.createOrderAtConfirm(existing.id);
+    }
+
     return hydrateSellerOrder(fresh);
+  }
+
+  /**
+   * Courier-driven SHIPPED transition. Reuses `updateStatus` (inventory commit +
+   * order_shipped email + history; the AWB satisfies the mandatory tracking
+   * number), then stamps the courier-specific fields the manual path lacks.
+   */
+  async markShippedFromCourier(
+    userId: string,
+    sellerOrderId: string,
+    patch: {
+      awbCode: string;
+      courierName: string;
+      trackingUrl?: string | null;
+      labelUrl?: string | null;
+      shipmentId?: string | null;
+      providerOrderId?: string | null;
+      shippingProvider?: 'SHIPROCKET' | 'MOCK' | null;
+      expectedDeliveryAt?: Date | null;
+    },
+  ) {
+    await this.updateStatus(userId, {
+      sellerOrderId,
+      status: OrderStatus.SHIPPED,
+      trackingNumber: patch.awbCode,
+      carrier: patch.courierName,
+      trackingUrl: patch.trackingUrl ?? undefined,
+      expectedDeliveryAt: patch.expectedDeliveryAt ?? undefined,
+    });
+    const fresh = await this.prisma.sellerOrder.update({
+      where: { id: sellerOrderId },
+      data: {
+        awbCode: patch.awbCode,
+        shipmentId: patch.shipmentId ?? undefined,
+        providerOrderId: patch.providerOrderId ?? undefined,
+        labelUrl: patch.labelUrl ?? undefined,
+        shippingProvider: patch.shippingProvider ?? undefined,
+      },
+      include: SELLER_ORDER_INCLUDE,
+    });
+    return hydrateSellerOrder(fresh);
+  }
+
+  /**
+   * System-driven status update from a courier webhook / tracking poll (no
+   * seller actor). Applies only forward, valid transitions; DELIVERED rolls the
+   * parent up + emails like the seller path. NDR/RTO are NOT status changes
+   * (SHIPPED→CANCELLED is forbidden) — they're recorded as metadata flags +
+   * a history note + an alert email for human resolution.
+   */
+  async applyCourierStatus(
+    sellerOrderId: string,
+    target: OrderStatus | 'NDR' | 'RTO',
+    note: string,
+  ): Promise<void> {
+    const so = await this.prisma.sellerOrder.findUnique({ where: { id: sellerOrderId } });
+    if (!so || so.deletedAt) return;
+
+    if (target === 'NDR' || target === 'RTO') {
+      const meta = (typeof so.metadata === 'object' && so.metadata) ? (so.metadata as Record<string, unknown>) : {};
+      const nextMeta = {
+        ...meta,
+        [target.toLowerCase()]: true,
+        [`${target.toLowerCase()}At`]: new Date().toISOString(),
+      } as Prisma.InputJsonValue;
+      await this.prisma.sellerOrder.update({
+        where: { id: so.id },
+        data: { metadata: nextMeta },
+      });
+      await this.prisma.orderStatusHistory.create({
+        data: { sellerOrderId: so.id, fromStatus: so.status, toStatus: so.status, notes: `Courier: ${note}` },
+      });
+      return;
+    }
+
+    if (so.status === target || !isValidTransition(so.status, target)) return;
+
+    const now = new Date();
+    const stamp: Prisma.SellerOrderUpdateInput = { status: target };
+    if (target === OrderStatus.SHIPPED) stamp.shippedAt = so.shippedAt ?? now;
+    if (target === OrderStatus.DELIVERED) stamp.deliveredAt = now;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.sellerOrder.update({ where: { id: so.id }, data: stamp });
+      await tx.orderStatusHistory.create({
+        data: { sellerOrderId: so.id, fromStatus: so.status, toStatus: target, notes: `Courier: ${note}` },
+      });
+      if (target === OrderStatus.DELIVERED) {
+        const siblings = await tx.sellerOrder.findMany({
+          where: { orderId: so.orderId },
+          select: { status: true },
+        });
+        if (siblings.every((s) => s.status === OrderStatus.DELIVERED)) {
+          await tx.order.update({
+            where: { id: so.orderId },
+            data: { deliveredAt: now, status: OrderStatus.DELIVERED },
+          });
+        }
+      }
+    });
+
+    this.dispatchStatusEmail(so.id, target, note).catch((err) =>
+      this.logger.warn(`Courier status email failed for ${so.id}: ${(err as Error).message}`),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -348,9 +777,10 @@ export class SellerOrderService {
       // don't reference them.
       cancellationReason: notes ?? 'No reason provided.',
       refundAmount: formatRupees(Number(so.subtotal)),
-      // Tracking fields are TODO once shipping integration lands.
-      trackingNumber: 'Pending',
-      trackingLink: `${frontendUrl}/account/orders/${so.orderId}`,
+      // Real tracking captured when the seller marked the order shipped.
+      trackingNumber: so.trackingNumber ?? 'Pending',
+      carrier: so.carrier ?? '',
+      trackingLink: so.trackingUrl ?? `${frontendUrl}/account/orders/${so.orderId}`,
       shopName: 'Trueway',
     });
   }

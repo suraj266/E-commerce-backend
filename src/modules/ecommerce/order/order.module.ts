@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { OrderService } from './order.service';
 import { OrderPlacementService } from './order-placement.service';
 import { OrderResolver } from './order.resolver';
@@ -6,6 +6,8 @@ import { SellerOrderService } from './seller-order.service';
 import { SellerOrderResolver } from './seller-order.resolver';
 import { EmailModule } from '@/modules/admin/email/email.module';
 import { CouponModule } from '@/modules/ecommerce/coupon/coupon.module';
+import { InvoiceModule } from '@/modules/ecommerce/invoice/invoice.module';
+import { CourierModule } from '@/modules/ecommerce/courier/courier.module';
 
 /**
  * Order module — Phase 5.
@@ -20,7 +22,7 @@ import { CouponModule } from '@/modules/ecommerce/coupon/coupon.module';
  * ORDER_FLOW.md for the rationale and what comes next.
  */
 @Module({
-  imports: [EmailModule, CouponModule],
+  imports: [EmailModule, CouponModule, InvoiceModule, forwardRef(() => CourierModule)],
   providers: [
     OrderPlacementService,
     OrderService,

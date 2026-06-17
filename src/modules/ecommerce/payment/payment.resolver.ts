@@ -2,7 +2,7 @@
  * PaymentResolver — customer-facing GraphQL for checkout.
  */
 
-import { Args, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
 import { UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '@/modules/identity/auth/jwt-auth.guard';
 import {
@@ -57,5 +57,19 @@ export class PaymentResolver {
     @Args('input') input: VerifyPaymentInput,
   ) {
     return this.paymentService.verifyPayment(user.userId, input);
+  }
+
+  /**
+   * Phase 2 (cancel): customer dismissed the gateway modal without paying.
+   * Cancels the prepaid order + releases reserved stock. Idempotent + race-safe
+   * (a captured payment is never cancelled).
+   */
+  @Mutation(() => Order, { name: 'cancelCheckout' })
+  @UseGuards(JwtAuthGuard)
+  async cancelCheckout(
+    @CurrentUser() user: CurrentUserPayload,
+    @Args('orderId', { type: () => ID }) orderId: string,
+  ) {
+    return this.paymentService.cancelCheckout(user.userId, orderId);
   }
 }

@@ -90,6 +90,16 @@ model Order {
   internalNotes String?
   metadata      Json    @default("{}")
 
+  /// Optional buyer GSTIN — captured at checkout if customer ticks
+  /// "buying for business". Persisted on Order (parent), surfaced on
+  /// every SellerOrder's invoice as the recipient GSTIN.
+  buyerGstin String? @db.VarChar(15)
+
+  /// Place of supply derived from `shippingAddress.state` at placement.
+  /// Stored on Order for audit and on each SellerOrder (with tax kind).
+  placeOfSupplyStateCode String? @db.Char(2)
+  placeOfSupplyStateName String?
+
   placedAt    DateTime  @default(now())
   cancelledAt DateTime?
   deliveredAt DateTime?
@@ -142,6 +152,57 @@ model SellerOrder {
   payoutAmount     Decimal @db.Decimal(10, 2) @default(0)
   currencyCode     String  @default("INR")
 
+  /// Shipping is a COMPOSITE SUPPLY taxed at the principal item's GST rate
+  /// (CGST §8 / Decision D7). The charge in `shippingAmount` is tax-INCLUSIVE;
+  /// these persist its back-calculated taxable value + GST split so the
+  /// invoice's CGST/SGST/IGST totals tie to the grand total without
+  /// recomputing the principal rate.
+  shippingTaxableValue Decimal @db.Decimal(12, 4) @default(0)
+  shippingCgstAmount   Decimal @db.Decimal(12, 4) @default(0)
+  shippingSgstAmount   Decimal @db.Decimal(12, 4) @default(0)
+  shippingIgstAmount   Decimal @db.Decimal(12, 4) @default(0)
+
+  /// Place of supply mirrored from parent Order. Kept here for invoice
+  /// rendering without joining back through Order.
+  placeOfSupplyStateCode String? @db.Char(2)
+  placeOfSupplyStateName String?
+  /// 'INTRA_STATE' (seller and buyer states equal → CGST + SGST) or
+  /// 'INTER_STATE' (states differ → IGST). Derived once at placement.
+  taxKind                String? @db.VarChar(20)
+
+  /// Tax invoice (CGST Rule 46). Allocated lazily on confirmation /
+  /// payment-capture by InvoiceService — null means not yet generated.
+  /// invoiceNumber follows `INV/FY{YY}-{YY}/{SELLER-CODE}/{6-digit-seq}`.
+  invoiceNumber String?   @unique
+  invoiceDate   DateTime?
+  invoiceUrl    String?
+
+  /// Fulfillment tracking — captured when the seller marks the order SHIPPED.
+  /// Manual: typed by the seller. Courier: filled from the provider API
+  /// (`trackingNumber` holds the AWB, `carrier` the courier name — reused by
+  /// the order_shipped email template).
+  trackingNumber     String?
+  carrier            String?
+  trackingUrl        String?
+  /// Courier hand-over time (distinct from `shippedAt`, the status change).
+  dispatchedAt       DateTime?
+  expectedDeliveryAt DateTime?
+
+  /// Courier-integration snapshot (Phase B). `shippingRateSource` is 'LIVE'
+  /// (provider rate) or 'IN_HOUSE' (flat engine). The selected courier is
+  /// snapshotted at placement so ship-time reuses the same one.
+  shippingRateSource  String?         @db.VarChar(12)
+  shippingProvider    CourierProvider?
+  selectedCourierId   String?
+  selectedCourierName String?
+  quotedShippingRate  Decimal?        @db.Decimal(10, 2)
+  billableWeightKg    Decimal?        @db.Decimal(10, 3)
+  /// Set at ship-time by the courier flow.
+  awbCode             String?
+  shipmentId          String?
+  providerOrderId     String?
+  labelUrl            String?
+
   metadata    Json      @default("{}")
   packedAt    DateTime?
   shippedAt   DateTime?
@@ -161,6 +222,8 @@ model SellerOrder {
   @@unique([orderId, sellerId])
   @@index([sellerId, status])
   @@index([storeId])
+  @@index([awbCode])
+  @@index([shipmentId])
 }
 
 /// OrderItem — one row per (variant, quantity) at checkout.
@@ -186,6 +249,30 @@ model OrderItem {
   totalPrice     Decimal @db.Decimal(10, 2)
   taxAmount      Decimal @db.Decimal(10, 2) @default(0)
   discountAmount Decimal @db.Decimal(10, 2) @default(0)
+
+  /// HSN code snapshotted from Product.hsnCode at placement — required on
+  /// tax invoice (CGST Rule 46). Nullable for legacy rows.
+  hsnCode      String? @db.VarChar(8)
+  /// ISO 3166-1 alpha-2 country-of-origin snapshot. Required by CP-EC
+  /// Rules 2020 and printed on the invoice. Nullable for legacy rows.
+  countryOfOrigin String? @db.Char(2)
+
+  /// Was the snapshotted price tax-inclusive? Preserved for audit so we
+  /// can re-derive taxable value if the product's flag flips later.
+  priceTaxInclusive Boolean @default(true)
+  /// Pre-tax taxable value (post-discount). For inclusive-price catalogs
+  /// this is back-calculated from MRP × qty − lineDiscount.
+  taxableValue   Decimal @db.Decimal(12, 4) @default(0)
+  /// Per-line GST breakup. Either (cgst + sgst) for intra-state or igst
+  /// for inter-state — never both. Cess is independent.
+  cgstRate   Decimal @db.Decimal(5, 2)  @default(0)
+  cgstAmount Decimal @db.Decimal(12, 4) @default(0)
+  sgstRate   Decimal @db.Decimal(5, 2)  @default(0)
+  sgstAmount Decimal @db.Decimal(12, 4) @default(0)
+  igstRate   Decimal @db.Decimal(5, 2)  @default(0)
+  igstAmount Decimal @db.Decimal(12, 4) @default(0)
+  cessRate   Decimal @db.Decimal(5, 2)  @default(0)
+  cessAmount Decimal @db.Decimal(12, 4) @default(0)
 
   /// Variant attributes captured at placement (so we can show
   /// "Color: Red, Size: M" even if the variant was deleted later).

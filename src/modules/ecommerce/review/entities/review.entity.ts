@@ -65,6 +65,10 @@ export class Review {
   @Field(() => String, { nullable: true })
   customerName?: string | null;
 
+  /** Author avatar URL from the joined Customer.user, null when unset. */
+  @Field(() => String, { nullable: true })
+  customerAvatarUrl?: string | null;
+
   @Field(() => Int)
   rating: number;
 

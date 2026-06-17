@@ -12,6 +12,10 @@ import {
 } from '@prisma/client';
 import { hash } from 'argon2';
 import {
+  findStateByCode,
+  stateCodeFromGstin,
+} from '@/common/constants/gst-states';
+import {
   SellerListItem,
   SellerListStatus,
 } from './entities/seller-list-item.entity';
@@ -80,6 +84,11 @@ export class SellerService {
         }
       : {};
 
+    // Resolve state. Prefer the explicit field; fall back to deriving from
+    // GSTIN's first two characters. We always assert agreement when both
+    // are present so the persisted code matches the GSTIN-issuing state.
+    const { stateCode, stateName } = this.resolveSellerState(input);
+
     return client.seller.create({
       data: {
         userId,
@@ -90,6 +99,8 @@ export class SellerService {
         registrationNumber: input.registrationNumber,
         panNumber: input.panNumber.toUpperCase(),
         gstin: input.gstin?.toUpperCase(),
+        stateCode,
+        stateName,
         businessEmail: input.businessEmail.toLowerCase(),
         businessPhone: this.normalizePhone(input.businessPhone),
         supportEmail: input.supportEmail?.toLowerCase(),
@@ -102,6 +113,41 @@ export class SellerService {
       },
       include: { payoutAccounts: { where: { deletedAt: null } } },
     });
+  }
+
+  /**
+   * Pick the canonical GST state for a seller. Three cases:
+   *
+   *   1. GSTIN present + stateCode present → assert agreement.
+   *      Throws BadRequestException if mismatched.
+   *   2. GSTIN present, stateCode absent → derive from GSTIN's first 2 chars.
+   *   3. GSTIN absent → use whatever stateCode was supplied (may be null).
+   *
+   * `stateName` is always rehydrated from the GST_STATES catalog so the
+   * display string stays canonical even if the client sent something odd.
+   */
+  private resolveSellerState(
+    input: Pick<CreateSellerInput, 'gstin' | 'stateCode' | 'stateName'>,
+  ): { stateCode: string | null; stateName: string | null } {
+    const fromGstin = stateCodeFromGstin(input.gstin?.toUpperCase());
+    const supplied = input.stateCode?.trim() || null;
+
+    let chosenCode: string | null = null;
+    if (fromGstin && supplied && fromGstin !== supplied) {
+      throw new BadRequestException(
+        `stateCode "${supplied}" does not match GSTIN prefix "${fromGstin}"`,
+      );
+    }
+    chosenCode = fromGstin ?? supplied;
+    if (!chosenCode) {
+      return { stateCode: null, stateName: null };
+    }
+
+    const canonical = findStateByCode(chosenCode);
+    if (!canonical) {
+      throw new BadRequestException(`Unknown GST state code: ${chosenCode}`);
+    }
+    return { stateCode: canonical.code, stateName: canonical.name };
   }
 
   /**
@@ -172,7 +218,7 @@ export class SellerService {
       }
     }
 
-    const { id, ...rest } = input;
+    const { id, stateCode: _sc, stateName: _sn, ...rest } = input;
     const data: Prisma.SellerUpdateInput = {
       ...rest,
       panNumber: rest.panNumber?.toUpperCase(),
@@ -187,6 +233,20 @@ export class SellerService {
         ? new Date(rest.dateOfIncorporation)
         : undefined,
     };
+
+    // Re-resolve state if the caller touched gstin or stateCode. We merge
+    // the input with existing seller values so partial updates still pick
+    // up the correct state.
+    if (input.gstin !== undefined || input.stateCode !== undefined) {
+      const merged = {
+        gstin: input.gstin ?? seller.gstin ?? undefined,
+        stateCode: input.stateCode ?? seller.stateCode ?? undefined,
+        stateName: input.stateName ?? seller.stateName ?? undefined,
+      };
+      const resolved = this.resolveSellerState(merged);
+      data.stateCode = resolved.stateCode;
+      data.stateName = resolved.stateName;
+    }
 
     // If editing a rejected profile, reset to DRAFT so they can re-submit cleanly
     if (seller.overallStatus === SellerStatus.REJECTED) {

@@ -79,6 +79,13 @@ export class Product {
   })
   priceWithTax?: number | null;
 
+  /** The GST portion alone (base × rate). Computed in the service layer. */
+  @Field(() => Float, {
+    nullable: true,
+    description: 'Tax portion = price × taxRate/100. Null if no tax assigned.',
+  })
+  taxAmount?: number | null;
+
   @Field(() => String, { nullable: true })
   sku?: string | null;
 
@@ -104,6 +111,19 @@ export class Product {
       'Harmonized System of Nomenclature code (4/6/8 digits). Required for GST invoicing in India.',
   })
   hsnCode?: string | null;
+
+  @Field(() => String, {
+    nullable: true,
+    description:
+      'ISO 3166-1 alpha-2 country code (e.g. "IN"). Required for ACTIVE status per CP-EC Rules 2020.',
+  })
+  countryOfOrigin?: string | null;
+
+  @Field(() => Boolean, {
+    description:
+      'Legacy flag — no longer affects pricing. Stored price is always treated as the pre-tax base; GST is added on top at checkout. Retained for historical-order re-derivation only.',
+  })
+  isPriceTaxInclusive: boolean;
 
   // ---- SEO ----
 

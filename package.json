@@ -32,7 +32,25 @@
     "seed:sliders": "ts-node src/prisma/seed/sliders.seed.ts",
     "seed:sliders:prod": "node dist/prisma/seed/sliders.seed.js",
     "seed:emails": "ts-node src/prisma/seed/emailTemplates.seed.ts",
-    "seed:emails:prod": "node dist/prisma/seed/emailTemplates.seed.js"
+    "seed:emails:prod": "node dist/prisma/seed/emailTemplates.seed.js",
+    "seed:emails:header": "ts-node src/prisma/seed/updateEmailHeaderBranding.ts",
+    "seed:emails:header:prod": "node dist/prisma/seed/updateEmailHeaderBranding.js",
+    "seed:roles": "ts-node src/prisma/seed/rolePermission.seed.ts",
+    "seed:roles:prod": "node dist/prisma/seed/rolePermission.seed.js",
+    "seed:settings": "ts-node src/prisma/seed/siteSettings.seed.ts",
+    "seed:settings:prod": "node dist/prisma/seed/siteSettings.seed.js",
+    "seed:demo": "ts-node src/prisma/seed/demoData.seed.ts",
+    "seed:demo:prod": "node dist/prisma/seed/demoData.seed.js",
+    "seed:invoices": "ts-node src/prisma/seed/invoiceTemplates.seed.ts",
+    "seed:invoices:prod": "node dist/prisma/seed/invoiceTemplates.seed.js",
+    "seed:labels": "ts-node src/prisma/seed/labels.seed.ts",
+    "seed:labels:prod": "node dist/prisma/seed/labels.seed.js",
+    "seed:collections": "ts-node src/prisma/seed/collections.seed.ts",
+    "seed:collections:prod": "node dist/prisma/seed/collections.seed.js",
+    "seed:posters": "ts-node src/prisma/seed/posterProducts.seed.ts",
+    "seed:posters:prod": "node dist/prisma/seed/posterProducts.seed.js",
+    "seed:all": "pnpm seed:roles && pnpm seed:taxes && pnpm seed:categories && pnpm seed:settings && pnpm seed:pages && pnpm seed:menus && pnpm seed:sliders && pnpm seed:emails && pnpm seed:invoices && pnpm seed:labels && pnpm seed:demo && pnpm seed:collections && pnpm seed:posters",
+    "seed:all:prod": "pnpm seed:roles:prod && pnpm seed:taxes:prod && pnpm seed:categories:prod && pnpm seed:settings:prod && pnpm seed:pages:prod && pnpm seed:menus:prod && pnpm seed:sliders:prod && pnpm seed:emails:prod && pnpm seed:invoices:prod && pnpm seed:labels:prod && pnpm seed:demo:prod && pnpm seed:collections:prod && pnpm seed:posters:prod"
   },
   "prisma": {
     "seed": "node dist/prisma/seed/rolePermission.seed.js",
@@ -51,6 +69,7 @@
     "@nestjs/jwt": "^11.0.2",
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/schedule": "^6.1.3",
     "@nestjs/terminus": "^11.1.1",
     "@nestjs/throttler": "^6.5.0",
     "@prisma/client": "^5.22.0",
@@ -73,6 +92,7 @@
     "passport-jwt": "^4.0.1",
     "pg": "^8.16.3",
     "pino-http": "^11.0.0",
+    "puppeteer": "^25.1.0",
     "razorpay": "^2.9.6",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
@@ -125,6 +145,9 @@
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/$1"
+    }
   }
 }

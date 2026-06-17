@@ -49,4 +49,29 @@ export class UpdateVariantInput {
   @IsOptional()
   @IsEnum(VariantStatus)
   status?: VariantStatus;
+
+  // Per-variant shipping dimensions (kg / cm) for courier package data.
+  @Field(() => Float, { nullable: true })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  weight?: number;
+
+  @Field(() => Float, { nullable: true })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  length?: number;
+
+  @Field(() => Float, { nullable: true })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  width?: number;
+
+  @Field(() => Float, { nullable: true })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  height?: number;
 }

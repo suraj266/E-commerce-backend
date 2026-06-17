@@ -13,6 +13,8 @@ import { SetStoreStatusInput } from './dto/set-store-status.input';
 import { AdminCreateStoreInput } from './dto/admin-create-store.input';
 import { CreateWarehouseInput } from './dto/create-warehouse.input';
 import { UpdateWarehouseInput } from './dto/update-warehouse.input';
+import { UpdateStoreShippingInput } from './dto/update-store-shipping.input';
+import { parseShippingConfig } from '../shipping/shipping-rate';
 
 @Injectable()
 export class StoreService {
@@ -235,6 +237,29 @@ export class StoreService {
   async adminUpdate(input: UpdateStoreInput) {
     const store = await this.findOne(input.id);
     return this.updateStoreRecord(store, input);
+  }
+
+  /**
+   * Update a store's shipping configuration (per-store rate model + COD).
+   * Merges the provided fields over the current `shippingConfig` Json so
+   * partial updates leave other keys intact. `excludedPincodes` (when sent)
+   * replaces the list wholesale.
+   */
+  async updateMyStoreShipping(userId: string, input: UpdateStoreShippingInput) {
+    const store = await this.assertOwnership(userId, input.storeId);
+    const current = parseShippingConfig(store.shippingConfig);
+
+    const { storeId: _storeId, ...patch } = input;
+    const merged: Record<string, unknown> = { ...current };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== undefined) merged[key] = value;
+    }
+
+    return this.prisma.store.update({
+      where: { id: store.id },
+      data: { shippingConfig: merged as Prisma.InputJsonValue },
+      include: { warehouses: { where: { deletedAt: null } } },
+    });
   }
 
   async submitMyStoreForReview(userId: string, storeId: string) {

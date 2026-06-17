@@ -1,0 +1,50 @@
+/// Product labels (badges) — small visual signals on product cards
+/// (sale / new / hot / bestseller / trending).
+///
+/// Two kinds (mirrors Shopify's manual vs smart collections):
+///   - MANUAL : admin/seller assigns it to specific products (junction).
+///   - AUTO   : applied by a rule (the `rule` RuleSet) evaluated against each
+///              product at read time — no manual assignment. e.g. "sale" when
+///              compareAtPrice > price, "bestseller" when unitsSold30d >= N.
+///
+/// Distinct from Tag (SEO keyword with its own /tag page). A product's
+/// displayed badges = enabled MANUAL labels (from the junction) + matching
+/// AUTO labels, sorted by `priority`, capped to the top 1-2 on a card.
+model Label {
+  id   String @id @default(uuid())
+  /// Stable identifier referenced from code/seeds (e.g. "sale", "bestseller").
+  key  String @unique
+  name String
+
+  /// Badge background — hex (e.g. "#ef4444") or a design token name.
+  color     String
+  /// Optional foreground; derived from `color` luminance when null.
+  textColor String?
+  /// Optional lucide-react icon name shown before the label text.
+  icon      String?
+
+  type LabelType @default(MANUAL)
+  /// AUTO only — a RuleSet JSON (see catalog-rules). Null for MANUAL labels.
+  rule Json?
+
+  /// Lower shows first; cards render the top 1-2 by priority.
+  priority     Int     @default(100)
+  isEnabled    Boolean @default(true)
+  /// System labels (seeded sale/new/bestseller/trending) — editable but not
+  /// deletable.
+  isSystem     Boolean @default(false)
+  displayOrder Int     @default(0)
+  metadata     Json    @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  /// MANUAL assignments only. AUTO labels are derived, never stored here.
+  products Product[] @relation("ProductLabels")
+}
+
+enum LabelType {
+  MANUAL
+  AUTO
+}

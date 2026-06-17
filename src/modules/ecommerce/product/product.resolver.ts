@@ -204,6 +204,8 @@ export class ProductResolver {
     @Args('brandSlug', { type: () => String, nullable: true }) brandSlug?: string,
     @Args('tagSlug', { type: () => String, nullable: true }) tagSlug?: string,
     @Args('categorySlug', { type: () => String, nullable: true }) categorySlug?: string,
+    @Args('collectionSlug', { type: () => String, nullable: true })
+    collectionSlug?: string,
     @Args('sort', { type: () => ProductSortOrder, nullable: true })
     sort?: ProductSortOrder,
     @Args('limit', { type: () => Number, nullable: true }) limit?: number,
@@ -213,6 +215,7 @@ export class ProductResolver {
       brandSlug,
       tagSlug,
       categorySlug,
+      collectionSlug,
       sort,
       limit,
     });
@@ -229,6 +232,8 @@ export class ProductResolver {
     @Args('tagSlug', { type: () => String, nullable: true }) tagSlug?: string,
     @Args('categorySlug', { type: () => String, nullable: true })
     categorySlug?: string,
+    @Args('collectionSlug', { type: () => String, nullable: true })
+    collectionSlug?: string,
     @Args('minPrice', { type: () => Float, nullable: true }) minPrice?: number,
     @Args('maxPrice', { type: () => Float, nullable: true }) maxPrice?: number,
     @Args('sort', { type: () => ProductSortOrder, nullable: true })
@@ -242,6 +247,7 @@ export class ProductResolver {
       brandSlug,
       tagSlug,
       categorySlug,
+      collectionSlug,
       minPrice,
       maxPrice,
       sort,

@@ -6,8 +6,28 @@ FROM node:25-slim AS builder
 
 WORKDIR /app
 
-# Prisma ko chalne ke liye OpenSSL chahiye jo slim image me nahi hota
-RUN apt-get update -y && apt-get install -y openssl
+# - openssl   : required by Prisma
+# - chromium  : used by puppeteer for tax-invoice PDF generation
+#               (we skip puppeteer's bundled Chrome — slim image has no
+#               tar/unzip to extract it, so we install the system one)
+# - fonts-liberation : sane default Latin font set for invoice rendering
+# - fonts-noto-core  : provides the Indian Rupee glyph (₹ / U+20B9) and other
+#                      symbols Liberation lacks — Chromium falls back to it
+#                      per-glyph so ₹ renders in the PDF
+# - ca-certificates : HTTPS for any network calls during render
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+      openssl \
+      chromium \
+      fonts-liberation \
+      fonts-noto-core \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Tell puppeteer NOT to download Chrome during pnpm install (slim image
+# lacks tar/unzip, and we'll use the apt-installed chromium instead).
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 RUN npm install -g pnpm@9
 
@@ -30,8 +50,17 @@ FROM node:25-slim AS production
 
 WORKDIR /app
 
-# Prisma ko chalne ke liye OpenSSL chahiye jo slim image me nahi hota
-RUN apt-get update -y && apt-get install -y openssl
+# Same runtime deps as the builder — invoice service needs chromium at run time.
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+      openssl \
+      chromium \
+      fonts-liberation \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 RUN npm install -g pnpm@9
 

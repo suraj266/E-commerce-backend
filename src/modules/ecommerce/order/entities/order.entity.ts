@@ -69,6 +69,44 @@ export class OrderItem {
   @Field(() => Float)
   discountAmount: number;
 
+  // ---- Phase 1: compliance snapshots + tax breakup ----
+
+  @Field(() => String, { nullable: true })
+  hsnCode?: string | null;
+
+  @Field(() => String, { nullable: true })
+  countryOfOrigin?: string | null;
+
+  @Field(() => Boolean)
+  priceTaxInclusive: boolean;
+
+  @Field(() => Float)
+  taxableValue: number;
+
+  @Field(() => Float)
+  cgstRate: number;
+
+  @Field(() => Float)
+  cgstAmount: number;
+
+  @Field(() => Float)
+  sgstRate: number;
+
+  @Field(() => Float)
+  sgstAmount: number;
+
+  @Field(() => Float)
+  igstRate: number;
+
+  @Field(() => Float)
+  igstAmount: number;
+
+  @Field(() => Float)
+  cessRate: number;
+
+  @Field(() => Float)
+  cessAmount: number;
+
   @Field(() => [OrderItemAttribute])
   attributesSnapshot: OrderItemAttribute[];
 
@@ -197,6 +235,54 @@ export class SellerOrder {
   @Field(() => Date, { nullable: true })
   cancelledAt?: Date | null;
 
+  // Fulfillment tracking — captured when the seller marks the order shipped.
+  @Field(() => String, { nullable: true })
+  trackingNumber?: string | null;
+
+  @Field(() => String, { nullable: true })
+  carrier?: string | null;
+
+  @Field(() => String, { nullable: true })
+  trackingUrl?: string | null;
+
+  @Field(() => Date, { nullable: true })
+  dispatchedAt?: Date | null;
+
+  @Field(() => Date, { nullable: true })
+  expectedDeliveryAt?: Date | null;
+
+  // Courier integration (Phase B). `shippingProvider` exposed as a String to
+  // avoid registering the Prisma enum in the GraphQL schema.
+  @Field(() => String, { nullable: true })
+  shippingRateSource?: string | null;
+
+  @Field(() => String, { nullable: true })
+  shippingProvider?: string | null;
+
+  @Field(() => String, { nullable: true })
+  selectedCourierId?: string | null;
+
+  @Field(() => String, { nullable: true })
+  selectedCourierName?: string | null;
+
+  @Field(() => Float, { nullable: true })
+  quotedShippingRate?: number | null;
+
+  @Field(() => Float, { nullable: true })
+  billableWeightKg?: number | null;
+
+  @Field(() => String, { nullable: true })
+  awbCode?: string | null;
+
+  @Field(() => String, { nullable: true })
+  shipmentId?: string | null;
+
+  @Field(() => String, { nullable: true })
+  providerOrderId?: string | null;
+
+  @Field(() => String, { nullable: true })
+  labelUrl?: string | null;
+
   @Field(() => Date)
   createdAt: Date;
 
@@ -224,6 +310,29 @@ export class SellerOrder {
 
   @Field(() => String, { nullable: true })
   customerName?: string | null;
+
+  // ---- Phase 1: place-of-supply + tax invoice ----
+
+  @Field(() => String, { nullable: true })
+  placeOfSupplyStateCode?: string | null;
+
+  @Field(() => String, { nullable: true })
+  placeOfSupplyStateName?: string | null;
+
+  /** 'INTRA_STATE' (CGST + SGST) or 'INTER_STATE' (IGST). */
+  @Field(() => String, { nullable: true })
+  taxKind?: string | null;
+
+  /** Tax invoice number, e.g. INV/FY26-27/A1B2/000123. Null until allocated. */
+  @Field(() => String, { nullable: true })
+  invoiceNumber?: string | null;
+
+  @Field(() => Date, { nullable: true })
+  invoiceDate?: Date | null;
+
+  /** Public URL of the rendered tax invoice PDF. Null until generated. */
+  @Field(() => String, { nullable: true })
+  invoiceUrl?: string | null;
 }
 
 /**
@@ -279,6 +388,16 @@ export class Order {
 
   @Field(() => String, { nullable: true })
   customerNotes?: string | null;
+
+  /** Optional buyer GSTIN captured at checkout for B2B invoices. */
+  @Field(() => String, { nullable: true })
+  buyerGstin?: string | null;
+
+  @Field(() => String, { nullable: true })
+  placeOfSupplyStateCode?: string | null;
+
+  @Field(() => String, { nullable: true })
+  placeOfSupplyStateName?: string | null;
 
   @Field(() => Date)
   placedAt: Date;

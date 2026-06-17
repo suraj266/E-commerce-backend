@@ -1,15 +1,18 @@
-import { Resolver, Query, Mutation, Args, ID } from '@nestjs/graphql';
+import { Resolver, Query, Mutation, Args, ID, ResolveField, Parent } from '@nestjs/graphql';
 import { UseGuards } from '@nestjs/common';
 import { StoreStatus } from '@prisma/client';
 import { StoreService } from './store.service';
 import { Store } from './entities/store.entity';
 import { Warehouse } from './entities/warehouse.entity';
+import { ShippingConfig } from './entities/shipping-config.entity';
 import { CreateStoreInput } from './dto/create-store.input';
 import { UpdateStoreInput } from './dto/update-store.input';
 import { SetStoreStatusInput } from './dto/set-store-status.input';
 import { AdminCreateStoreInput } from './dto/admin-create-store.input';
 import { CreateWarehouseInput } from './dto/create-warehouse.input';
 import { UpdateWarehouseInput } from './dto/update-warehouse.input';
+import { UpdateStoreShippingInput } from './dto/update-store-shipping.input';
+import { parseShippingConfig } from '../shipping/shipping-rate';
 import { JwtAuthGuard } from '@/modules/identity/auth/jwt-auth.guard';
 import { PermissionsGuard } from '@/common/guards/permissions.guard';
 import { Permissions } from '@/common/decorators/permissions.decorator';
@@ -55,6 +58,15 @@ export class StoreResolver {
     @Args('updateStoreInput') input: UpdateStoreInput,
   ) {
     return this.storeService.updateMyStore(user.userId, input);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Mutation(() => Store)
+  updateMyStoreShipping(
+    @CurrentUser() user: CurrentUserPayload,
+    @Args('input') input: UpdateStoreShippingInput,
+  ) {
+    return this.storeService.updateMyStoreShipping(user.userId, input);
   }
 
   @UseGuards(JwtAuthGuard)
@@ -171,5 +183,24 @@ export class StoreResolver {
     @Args('storeId', { type: () => ID }) storeId: string,
   ) {
     return this.storeService.myWarehouses(user.userId, storeId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Computed fields
+  // ---------------------------------------------------------------------------
+
+  /** Surfaces the raw `shippingConfig` Json as a typed, safe-defaulted object. */
+  @ResolveField(() => ShippingConfig, { name: 'shippingConfig' })
+  resolveShippingConfig(@Parent() store: { shippingConfig?: unknown }): ShippingConfig {
+    const c = parseShippingConfig(store.shippingConfig);
+    return {
+      freeAbove: c.freeAbove ?? null,
+      flatRate: c.flatRate,
+      perKgRate: c.perKgRate ?? null,
+      codEnabled: c.codEnabled ?? false,
+      codLimit: c.codLimit ?? null,
+      processingDays: c.processingDays ?? null,
+      excludedPincodes: c.excludedPincodes ?? [],
+    };
   }
 }

@@ -1,0 +1,42 @@
+/// Product collections — curated/automatic groupings with their own page +
+/// home/nav slots (e.g. "Trending", "New Arrivals", "Festival Special").
+///
+/// Two kinds (mirrors Shopify manual vs smart collections):
+///   - MANUAL : admin hand-picks products (the M:N junction).
+///   - SMART  : a RuleSet (shared catalog-rules engine) auto-selects matching
+///              products at query time — new products that match appear
+///              automatically. `rule` is null for MANUAL collections.
+model Collection {
+  id          String @id @default(uuid())
+  name        String
+  slug        String @unique
+  description String?
+  bannerUrl   String?
+  imageUrl    String?
+
+  type CollectionType @default(MANUAL)
+  /// SMART only — a RuleSet JSON (see catalog-rules). Null for MANUAL.
+  rule Json?
+
+  status       CollectionStatus @default(ACTIVE)
+  isFeatured   Boolean          @default(false)
+  displayOrder Int              @default(0)
+  metadata     Json             @default("{}")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  /// MANUAL membership. SMART collections resolve members via the rule engine.
+  products Product[] @relation("CollectionProducts")
+}
+
+enum CollectionType {
+  MANUAL
+  SMART
+}
+
+enum CollectionStatus {
+  ACTIVE
+  INACTIVE
+}

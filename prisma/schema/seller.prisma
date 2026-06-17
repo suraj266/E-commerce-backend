@@ -32,6 +32,14 @@ model Seller {
   panNumber String  @unique // India PAN — 10 chars
   gstin     String? @unique // 15-char GSTIN, optional until go-live
 
+  // Place-of-supply identity. `stateCode` is the 2-digit GST state code
+  // (e.g., "27" = Maharashtra) — same prefix that appears on every GSTIN
+  // issued in that state. Validated against GSTIN's first 2 chars when both
+  // are present. Required for VERIFIED status; nullable until then so we
+  // can store DRAFT sellers without forcing state up-front.
+  stateCode String? @db.Char(2)
+  stateName String?
+
   // Contact
   businessEmail String  @unique
   businessPhone String  @unique
@@ -57,10 +65,11 @@ model Seller {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  user           User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  stores         Store[]
-  payoutAccounts SellerPayoutAccount[]
-  sellerOrders   SellerOrder[]
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stores          Store[]
+  payoutAccounts  SellerPayoutAccount[]
+  sellerOrders    SellerOrder[]
+  courierAccounts CourierAccount[]
 }
 
 model SellerPayoutAccount {

@@ -20,6 +20,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { OrderModule } from '../order/order.module';
+import { InvoiceModule } from '../invoice/invoice.module';
 
 // Crypto
 import { CryptoService } from '@/common/crypto/crypto.service';
@@ -42,7 +43,7 @@ import { PaymentAdminResolver } from './payment-admin.resolver';
 import { PaymentWebhookController } from './payment-webhook.controller';
 
 @Module({
-  imports: [ConfigModule, OrderModule],
+  imports: [ConfigModule, OrderModule, InvoiceModule],
   controllers: [PaymentWebhookController],
   providers: [
     CryptoService,

@@ -159,6 +159,30 @@ export class CreateProductInput {
   })
   hsnCode?: string;
 
+  /**
+   * ISO 3166-1 alpha-2 country code (e.g. "IN", "CN"). Required by
+   * Consumer Protection (E-Commerce) Rules 2020 — must appear on the PDP
+   * and tax invoice. Defaults to "IN" via the migration backfill; sellers
+   * can override before publishing.
+   */
+  @Field(() => String, { nullable: true })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Z]{2}$/, {
+    message: 'countryOfOrigin must be a 2-char ISO 3166-1 alpha-2 code',
+  })
+  countryOfOrigin?: string;
+
+  /**
+   * Tax-inclusive pricing flag. True (default) = stored price is MRP and
+   * GST is back-calculated at checkout. False = stored price is exclusive,
+   * GST added on top. Sellers can flip per-product for B2B SKUs.
+   */
+  @Field(() => Boolean, { nullable: true, defaultValue: true })
+  @IsOptional()
+  @IsBoolean()
+  isPriceTaxInclusive?: boolean;
+
   // ---- SEO ----
 
   @Field(() => String, { nullable: true })
@@ -196,4 +220,12 @@ export class CreateProductInput {
   @IsArray()
   @IsUUID('4', { each: true })
   tagIds?: string[];
+
+  // ---- Labels (M:N — MANUAL labels assigned by id; AUTO labels are derived) ----
+
+  @Field(() => [ID], { nullable: true })
+  @IsOptional()
+  @IsArray()
+  @IsUUID('4', { each: true })
+  labelIds?: string[];
 }

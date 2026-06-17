@@ -1,0 +1,61 @@
+/// Invoice numbering — per CGST Rule 46(b).
+///
+/// Each registered supplier (seller in marketplace terms) maintains a
+/// consecutive sequence of invoice numbers, unique per financial year.
+/// We model this as a counter row per (sellerId, fiscalYear).
+///
+/// Allocation is atomic via Prisma upsert + increment inside a transaction.
+/// The actual invoice number string is composed in InvoiceNumberService:
+///
+///   INV/FY{YY}-{YY}/{SELLER-CODE}/{6-digit-seq}
+///
+/// where SELLER-CODE = first 4 hex chars of Seller.id (uppercased, dashes
+/// stripped). See backend/src/modules/ecommerce/invoice/invoice-number.service.ts
+/// for the allocation logic.
+model InvoiceSequence {
+  id String @id @default(uuid())
+
+  /// FK to Seller (logical — no relation since this is a counter table
+  /// that survives seller hard-delete; soft-delete is the norm anyway).
+  sellerId String
+
+  /// Indian fiscal year label, e.g. "FY26-27" — covers Apr 1 to Mar 31.
+  fiscalYear String @db.VarChar(8)
+
+  /// Next sequence number to allocate. Starts at 1, incremented atomically
+  /// each time InvoiceNumberService.allocate() is called.
+  nextSeq Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([sellerId, fiscalYear])
+  @@index([sellerId])
+}
+
+/// Admin-editable tax-invoice template (mirrors EmailTemplate).
+///
+/// One row per template `key`. The PDF generator renders `htmlBody`
+/// (Handlebars) with the per-order invoice context, injecting `css` as a
+/// `<style>` block. Seeded with the canonical default (`tax_invoice`);
+/// admins edit it in place from the admin panel. Rendering reads from this
+/// row at request time — there is intentionally NO file read, so a missing
+/// asset can never break invoice generation.
+model InvoiceTemplate {
+  id          String   @id @default(uuid())
+  /// Stable identifier referenced from code, e.g. "tax_invoice".
+  key         String   @unique
+  name        String
+  description String
+  /// Handlebars HTML body.
+  htmlBody    String
+  /// Stylesheet injected into the template head as {{{css}}}.
+  css         String
+  /// Documented context variables for the admin "insert variable" chips.
+  variables   String[] @default([])
+  isEnabled   Boolean  @default(true)
+  /// System templates can be edited but not deleted/disabled.
+  isSystem    Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}

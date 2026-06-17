@@ -1,6 +1,7 @@
 import { ObjectType, Field, ID, registerEnumType } from '@nestjs/graphql';
 import { StoreStatus } from '@prisma/client';
 import { Warehouse } from './warehouse.entity';
+import { ShippingConfig } from './shipping-config.entity';
 
 registerEnumType(StoreStatus, { name: 'StoreStatus' });
 
@@ -65,4 +66,8 @@ export class Store {
 
   @Field(() => [Warehouse], { nullable: true })
   warehouses?: Warehouse[];
+
+  /** Resolved from the `shippingConfig` Json via a @ResolveField. */
+  @Field(() => ShippingConfig)
+  shippingConfig: ShippingConfig;
 }

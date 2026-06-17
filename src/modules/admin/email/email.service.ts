@@ -22,6 +22,7 @@ import * as nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 
 import { PrismaService } from '@/prisma/prisma.service';
+import { SiteSettingService } from '@/modules/admin/site-setting/site-setting.service';
 import { EmailConfigService } from './email-config.service';
 
 export interface SendEmailContext {
@@ -40,13 +41,26 @@ export interface SendEmailResult {
   logId?: string;
 }
 
+interface BrandingContext {
+  shopName: string;
+  logoUrl: string;
+}
+
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
 
+  // Branding (brand name + logo URL) rarely changes, so cache it briefly to
+  // avoid two SiteSetting reads on every send. Short TTL keeps admin edits
+  // visible within a minute.
+  private brandingCache: { value: BrandingContext; expiresAt: number } | null =
+    null;
+  private static readonly BRANDING_CACHE_TTL_MS = 60 * 1000; // 60 seconds
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: EmailConfigService,
+    private readonly siteSettings: SiteSettingService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -104,11 +118,19 @@ export class EmailService {
       };
     }
 
+    // Inject global branding (shopName + logoUrl) from SiteSetting so every
+    // template's shared header renders the admin-managed brand without each
+    // caller having to pass it. Branding wins over caller-supplied keys: this
+    // unifies the brand identity and overrides the legacy hardcoded shopName
+    // values scattered across callers.
+    const branding = await this.getBrandingContext();
+    const brandedContext: SendEmailContext = { ...context, ...branding };
+
     let subject: string;
     let html: string;
     let text: string | undefined;
     try {
-      const rendered = await this.render(template, context);
+      const rendered = await this.render(template, brandedContext);
       subject = rendered.subject;
       html = rendered.html;
       text = rendered.text;
@@ -132,8 +154,45 @@ export class EmailService {
       html,
       text,
       templateKey,
-      context,
+      context: brandedContext,
     });
+  }
+
+  /**
+   * Resolve the global brand identity (name + logo URL) from SiteSetting.
+   *
+   * `logoUrl` MUST be an absolute, publicly-reachable URL for email clients to
+   * render it — they cannot load `localhost` or `data:` URIs. When unset, the
+   * header partial falls back to the `shopName` text. Soft-fails to sensible
+   * defaults so a SiteSetting read error never blocks an email.
+   */
+  private async getBrandingContext(): Promise<BrandingContext> {
+    const now = Date.now();
+    if (this.brandingCache && this.brandingCache.expiresAt > now) {
+      return this.brandingCache.value;
+    }
+
+    let value: BrandingContext = { shopName: 'Ecommerce', logoUrl: '' };
+    try {
+      const [name, logo] = await Promise.all([
+        this.siteSettings.findByKey('platform_name'),
+        this.siteSettings.findByKey('platform_logo_url'),
+      ]);
+      value = {
+        shopName: name?.value ? name.value : 'Ecommerce',
+        logoUrl: logo?.value ?? '',
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Could not load branding settings: ${(err as Error).message}. Using defaults.`,
+      );
+    }
+
+    this.brandingCache = {
+      value,
+      expiresAt: now + EmailService.BRANDING_CACHE_TTL_MS,
+    };
+    return value;
   }
 
   /**
