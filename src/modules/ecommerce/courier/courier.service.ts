@@ -16,6 +16,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { CourierProvider, OrderStatus } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
+import { timingSafeEqualStr } from '@/common/crypto/timing-safe.util';
 import { parseShippingConfig } from '@/modules/ecommerce/shipping/shipping-rate';
 import { SellerOrderService } from '@/modules/ecommerce/order/seller-order.service';
 import { CourierAccountService } from './courier-account.service';
@@ -77,7 +78,8 @@ export class CourierService {
       where: { storeId, isDefault: true, isActive: true, deletedAt: null },
       select: { postalCode: true },
     });
-    if (wh?.postalCode && /^[1-9][0-9]{5}$/.test(wh.postalCode)) return wh.postalCode;
+    if (wh?.postalCode && /^[1-9][0-9]{5}$/.test(wh.postalCode))
+      return wh.postalCode;
     const store = await this.prisma.store.findUnique({
       where: { id: storeId },
       select: { shippingConfig: true },
@@ -152,7 +154,9 @@ export class CourierService {
 
   /** Prefer the provider's recommended courier; else the cheapest serviceable one. */
   private pickCourier(rates: RateQuote[], cod: boolean): RateQuote | null {
-    const usable = rates.filter((r) => r.serviceable && (!cod || r.codAvailable));
+    const usable = rates.filter(
+      (r) => r.serviceable && (!cod || r.codAvailable),
+    );
     if (usable.length === 0) return null;
     return (
       usable.find((r) => r.recommended) ??
@@ -168,7 +172,9 @@ export class CourierService {
     const sellerId = await this.sellerIdOf(userId);
     const account = await this.accounts.getEnabledAccount(sellerId);
     if (!account || account.provider !== provider) {
-      throw new BadRequestException('Connect this courier before fetching pickup locations.');
+      throw new BadRequestException(
+        'Connect this courier before fetching pickup locations.',
+      );
     }
     const impl = this.accounts.getProvider(provider);
     const { context } = await this.accounts.getValidContext(account.id);
@@ -192,7 +198,10 @@ export class CourierService {
       if (!account || !account.pickupLocationNickname) return; // not connected / no pickup
       const impl = this.accounts.getProvider(account.provider);
       const { context } = await this.accounts.getValidContext(account.id);
-      const created = await impl.createShipment(context, this.buildShipmentRequest(so, account));
+      const created = await impl.createShipment(
+        context,
+        this.buildShipmentRequest(so, account),
+      );
       await this.prisma.sellerOrder.update({
         where: { id: so.id },
         data: {
@@ -201,9 +210,13 @@ export class CourierService {
           shippingProvider: account.provider,
         },
       });
-      this.logger.log(`Pushed ${so.orderNumber} to ${account.provider} (shipment ${created.providerShipmentId}).`);
+      this.logger.log(
+        `Pushed ${so.orderNumber} to ${account.provider} (shipment ${created.providerShipmentId}).`,
+      );
     } catch (e) {
-      this.logger.warn(`createOrderAtConfirm failed for ${sellerOrderId}: ${(e as Error).message}`);
+      this.logger.warn(
+        `createOrderAtConfirm failed for ${sellerOrderId}: ${(e as Error).message}`,
+      );
     }
   }
 
@@ -214,14 +227,17 @@ export class CourierService {
   async getCourierOptions(userId: string, sellerOrderId: string) {
     const so = await this.loadSellerOrder(sellerOrderId);
     if (!so) throw new NotFoundException('Order not found.');
-    if (so.seller.userId !== userId) throw new BadRequestException('You do not own this order.');
+    if (so.seller.userId !== userId)
+      throw new BadRequestException('You do not own this order.');
     const account = await this.accounts.getEnabledAccount(so.sellerId);
     if (!account) throw new BadRequestException('No courier connected.');
 
     const pickupPincode = await this.resolvePickupPincode(so.storeId);
     const deliveryPincode = so.order.shippingAddress?.postalCode ?? '';
     if (!pickupPincode || !/^[1-9][0-9]{5}$/.test(deliveryPincode)) {
-      throw new BadRequestException('Valid pickup + delivery pincodes are required to list couriers.');
+      throw new BadRequestException(
+        'Valid pickup + delivery pincodes are required to list couriers.',
+      );
     }
     const impl = this.accounts.getProvider(account.provider);
     const { context } = await this.accounts.getValidContext(account.id);
@@ -243,21 +259,33 @@ export class CourierService {
   // Fulfillment: assign the chosen courier → AWB → pickup → label → SHIPPED
   // ---------------------------------------------------------------------------
 
-  async shipViaCourier(userId: string, sellerOrderId: string, courierId: string) {
+  async shipViaCourier(
+    userId: string,
+    sellerOrderId: string,
+    courierId: string,
+  ) {
     const so = await this.loadSellerOrder(sellerOrderId);
     if (!so) throw new NotFoundException('Order not found.');
-    if (so.seller.userId !== userId) throw new BadRequestException('You do not own this order.');
+    if (so.seller.userId !== userId)
+      throw new BadRequestException('You do not own this order.');
     if (so.status !== OrderStatus.PACKED) {
-      throw new BadRequestException('Mark the order PACKED before shipping with a courier.');
+      throw new BadRequestException(
+        'Mark the order PACKED before shipping with a courier.',
+      );
     }
-    if (!courierId) throw new BadRequestException('Select a courier to ship with.');
+    if (!courierId)
+      throw new BadRequestException('Select a courier to ship with.');
 
     const account = await this.accounts.getEnabledAccount(so.sellerId);
     if (!account) {
-      throw new BadRequestException('No courier connected. Use manual shipping instead.');
+      throw new BadRequestException(
+        'No courier connected. Use manual shipping instead.',
+      );
     }
     if (!account.pickupLocationNickname) {
-      throw new BadRequestException('Select a pickup location for your courier first (Shipping → Manage).');
+      throw new BadRequestException(
+        'Select a pickup location for your courier first (Shipping → Manage).',
+      );
     }
 
     const impl = this.accounts.getProvider(account.provider);
@@ -268,12 +296,19 @@ export class CourierService {
     let providerShipmentId = so.shipmentId;
     let providerOrderId = so.providerOrderId;
     if (!providerShipmentId) {
-      const created = await impl.createShipment(context, this.buildShipmentRequest(so, account));
+      const created = await impl.createShipment(
+        context,
+        this.buildShipmentRequest(so, account),
+      );
       providerShipmentId = created.providerShipmentId;
       providerOrderId = created.providerOrderId;
       await this.prisma.sellerOrder.update({
         where: { id: so.id },
-        data: { shipmentId: providerShipmentId, providerOrderId, shippingProvider: account.provider },
+        data: {
+          shipmentId: providerShipmentId,
+          providerOrderId,
+          shippingProvider: account.provider,
+        },
       });
     }
 
@@ -283,12 +318,16 @@ export class CourierService {
     try {
       await impl.schedulePickup(context, providerShipmentId);
     } catch (e) {
-      this.logger.warn(`Pickup scheduling failed for ${so.orderNumber}: ${(e as Error).message}`);
+      this.logger.warn(
+        `Pickup scheduling failed for ${so.orderNumber}: ${(e as Error).message}`,
+      );
     }
     try {
       labelUrl = (await impl.getLabel(context, providerShipmentId)).labelUrl;
     } catch (e) {
-      this.logger.warn(`Label generation failed for ${so.orderNumber}: ${(e as Error).message}`);
+      this.logger.warn(
+        `Label generation failed for ${so.orderNumber}: ${(e as Error).message}`,
+      );
     }
 
     return this.sellerOrders.markShippedFromCourier(userId, so.id, {
@@ -307,8 +346,14 @@ export class CourierService {
   // ---------------------------------------------------------------------------
 
   private async sellerIdOf(userId: string): Promise<string> {
-    const seller = await this.prisma.seller.findUnique({ where: { userId }, select: { id: true } });
-    if (!seller) throw new BadRequestException('You must complete seller onboarding first.');
+    const seller = await this.prisma.seller.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (!seller)
+      throw new BadRequestException(
+        'You must complete seller onboarding first.',
+      );
     return seller.id;
   }
 
@@ -343,10 +388,14 @@ export class CourierService {
       country: addr.countryCode === 'IN' ? 'India' : addr.countryCode,
     };
     if (!/^[0-9]{10}$/.test(shipping.phone)) {
-      throw new BadRequestException('A valid 10-digit delivery phone number is required by the courier.');
+      throw new BadRequestException(
+        'A valid 10-digit delivery phone number is required by the courier.',
+      );
     }
     if (!/^[1-9][0-9]{5}$/.test(shipping.pincode)) {
-      throw new BadRequestException('A valid 6-digit delivery pincode is required by the courier.');
+      throw new BadRequestException(
+        'A valid 6-digit delivery pincode is required by the courier.',
+      );
     }
     return {
       orderNumber: so.orderNumber,
@@ -398,7 +447,9 @@ export class CourierService {
       },
     });
     if (!so) {
-      this.logger.warn(`Courier webhook unmatched (awb=${awb} order=${providerOrderId})`);
+      this.logger.warn(
+        `Courier webhook unmatched (awb=${awb} order=${providerOrderId})`,
+      );
       return;
     }
 
@@ -407,7 +458,25 @@ export class CourierService {
     const impl = this.accounts.getProvider(account.provider);
     const evt = impl.normalizeWebhook(rawBody);
 
-    // Idempotency: unique dedupeKey → process exactly once.
+    // Authenticate BEFORE writing anything. A missing webhookSecret fails closed
+    // (previously an empty secret trusted any caller), and the token compare is
+    // constant-time. Verifying before the dedupe insert also stops an
+    // unauthenticated caller from occupying the process-once dedupeKey and
+    // suppressing a later legitimate event.
+    if (!account.webhookSecret) {
+      this.logger.warn(
+        `Courier account for seller ${so.sellerId} has no webhookSecret configured — rejecting webhook for ${so.orderNumber}`,
+      );
+      return;
+    }
+    if (!timingSafeEqualStr(account.webhookSecret, apiKey)) {
+      this.logger.warn(
+        `Courier webhook signature mismatch for ${so.orderNumber}`,
+      );
+      return;
+    }
+
+    // Idempotency: unique dedupeKey → process exactly once (authenticated only).
     try {
       await this.prisma.courierWebhookLog.create({
         data: {
@@ -419,28 +488,23 @@ export class CourierService {
           normalizedStatus: evt.normalizedStatus,
           dedupeKey: evt.dedupeKey,
           payload: body,
+          signatureValid: true,
+          processedAt: new Date(),
         },
       });
     } catch {
       return; // duplicate event
     }
 
-    // Verify the token the seller set in their courier panel.
-    const signatureValid = !account.webhookSecret || account.webhookSecret === apiKey;
-    await this.prisma.courierWebhookLog.update({
-      where: { dedupeKey: evt.dedupeKey },
-      data: { signatureValid, processedAt: new Date() },
-    });
-    if (!signatureValid) {
-      this.logger.warn(`Courier webhook signature mismatch for ${so.orderNumber}`);
-      return;
-    }
-
     await this.applyStatus(so.id, evt.normalizedStatus, evt.rawStatusCode);
   }
 
   /** Poll-or-webhook status application — maps normalized status to the order machine. */
-  async applyStatus(sellerOrderId: string, status: NormalizedStatus, note: string): Promise<void> {
+  async applyStatus(
+    sellerOrderId: string,
+    status: NormalizedStatus,
+    note: string,
+  ): Promise<void> {
     let target: OrderStatus | 'NDR' | 'RTO' | null = null;
     switch (status) {
       case NormalizedStatus.PICKED_UP:
@@ -463,6 +527,10 @@ export class CourierService {
       default:
         return;
     }
-    await this.sellerOrders.applyCourierStatus(sellerOrderId, target, note || status);
+    await this.sellerOrders.applyCourierStatus(
+      sellerOrderId,
+      target,
+      note || status,
+    );
   }
 }

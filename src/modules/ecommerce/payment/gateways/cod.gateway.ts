@@ -14,6 +14,7 @@ import type {
   VerifyPaymentInput,
   RefundInput,
   RefundResult,
+  FetchedPayment,
 } from './payment-gateway.interface';
 
 @Injectable()
@@ -26,7 +27,9 @@ export class CodGateway implements IPaymentGateway {
     // nothing to do
   }
 
-  async createSession(input: CreateSessionInput): Promise<PaymentSessionResult> {
+  async createSession(
+    input: CreateSessionInput,
+  ): Promise<PaymentSessionResult> {
     // COD doesn't create an external session. The "gatewayOrderId" is just
     // the internal order ID so the Payment row has something to reference.
     return {
@@ -45,6 +48,19 @@ export class CodGateway implements IPaymentGateway {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   verifyWebhook(_rawBody: Buffer, _signature: string): boolean {
     return true;
+  }
+
+  // COD never reaches an amount-verification path (it is CAPTURED at checkout
+  // and verifyPayment early-returns on CAPTURED). These exist only to satisfy
+  // the interface; calling them is a programming error.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async fetchPayment(_gatewayPaymentId: string): Promise<FetchedPayment> {
+    throw new Error('fetchPayment is not supported for COD.');
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async fetchOrderPayments(_gatewayOrderId: string): Promise<FetchedPayment[]> {
+    return [];
   }
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

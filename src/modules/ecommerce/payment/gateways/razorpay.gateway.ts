@@ -15,6 +15,7 @@
 
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { createHmac } from 'crypto';
+import { timingSafeEqualStr } from '@/common/crypto/timing-safe.util';
 import type {
   IPaymentGateway,
   CreateSessionInput,
@@ -22,6 +23,7 @@ import type {
   VerifyPaymentInput,
   RefundInput,
   RefundResult,
+  FetchedPayment,
 } from './payment-gateway.interface';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -34,7 +36,7 @@ export class RazorpayGateway implements IPaymentGateway {
   private keyId = '';
   private keySecret = '';
   private webhookSecret = '';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   private client: any = null;
 
   initialize(credentials: Record<string, unknown>): void {
@@ -54,7 +56,9 @@ export class RazorpayGateway implements IPaymentGateway {
     });
   }
 
-  async createSession(input: CreateSessionInput): Promise<PaymentSessionResult> {
+  async createSession(
+    input: CreateSessionInput,
+  ): Promise<PaymentSessionResult> {
     if (!this.client) {
       throw new BadRequestException('Razorpay gateway not initialized.');
     }
@@ -62,15 +66,19 @@ export class RazorpayGateway implements IPaymentGateway {
     // Razorpay expects amount in paise (smallest unit).
     const amountInPaise = Math.round(input.amount * 100);
 
-    const order = await this.client.orders.create({
-      amount: amountInPaise,
-      currency: input.currency || 'INR',
-      receipt: input.orderNumber,
-      notes: {
-        orderId: input.orderId,
-        orderNumber: input.orderNumber,
-      },
-    });
+    // On a retry, reuse the previously-created Razorpay order instead of
+    // spawning a second live session for the same internal order.
+    const order = input.existingGatewayOrderId
+      ? { id: input.existingGatewayOrderId }
+      : await this.client.orders.create({
+          amount: amountInPaise,
+          currency: input.currency || 'INR',
+          receipt: input.orderNumber,
+          notes: {
+            orderId: input.orderId,
+            orderNumber: input.orderNumber,
+          },
+        });
 
     return {
       gatewayOrderId: order.id,
@@ -96,7 +104,8 @@ export class RazorpayGateway implements IPaymentGateway {
       .update(`${input.gatewayOrderId}|${input.gatewayPaymentId}`)
       .digest('hex');
 
-    return expectedSignature === input.gatewaySignature;
+    // Constant-time compare — a plain === leaks the signature byte by byte.
+    return timingSafeEqualStr(expectedSignature, input.gatewaySignature);
   }
 
   verifyWebhook(rawBody: Buffer, signature: string): boolean {
@@ -106,7 +115,35 @@ export class RazorpayGateway implements IPaymentGateway {
       .update(rawBody)
       .digest('hex');
 
-    return expectedSignature === signature;
+    return timingSafeEqualStr(expectedSignature, signature);
+  }
+
+  async fetchPayment(gatewayPaymentId: string): Promise<FetchedPayment> {
+    if (!this.client) {
+      throw new BadRequestException('Razorpay gateway not initialized.');
+    }
+    const p = await this.client.payments.fetch(gatewayPaymentId);
+    return {
+      amount: Number(p.amount), // paise
+      currency: p.currency,
+      status: p.status, // 'captured' | 'authorized' | 'failed' | ...
+      gatewayOrderId: p.order_id,
+    };
+  }
+
+  async fetchOrderPayments(gatewayOrderId: string): Promise<FetchedPayment[]> {
+    if (!this.client) {
+      throw new BadRequestException('Razorpay gateway not initialized.');
+    }
+    const res = await this.client.orders.fetchPayments(gatewayOrderId);
+
+    const items: any[] = res?.items ?? [];
+    return items.map((p) => ({
+      amount: Number(p.amount),
+      currency: p.currency,
+      status: p.status,
+      gatewayOrderId: p.order_id,
+    }));
   }
 
   async refund(input: RefundInput): Promise<RefundResult> {

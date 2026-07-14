@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -122,11 +123,14 @@ export class ImageService {
 
   async deleteImage(id: string, userId: string) {
     const img = await this.findById(id);
-    // Only uploader or admin can delete. Admin permission check happens in
-    // the resolver via @Permissions decorator. Here we enforce ownership.
+    // Object-level authorization: only the uploader (or a platform admin) may
+    // delete an image. Previously this was an empty if-block, so any
+    // authenticated user could delete anyone's image by id (IDOR).
     if (img.uploadedById && img.uploadedById !== userId) {
-      // We let admin pass via resolver guard — service trusts the caller for
-      // the admin path. For self-delete, ownership must match.
+      const privileged = await this.isAdminUser(userId);
+      if (!privileged) {
+        throw new ForbiddenException('You cannot delete this image.');
+      }
     }
     await this.provider.delete(img.externalId).catch((err) => {
       this.logger.warn(`Provider delete failed for ${img.externalId}`, err);
@@ -135,6 +139,16 @@ export class ImageService {
       where: { id },
       data: { deletedAt: new Date() },
     });
+  }
+
+  /** True for platform admins/super-admins (matches the auth account-type gate). */
+  private async isAdminUser(userId: string): Promise<boolean> {
+    const u = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: { select: { name: true } } },
+    });
+    const roleName = u?.role?.name ?? '';
+    return roleName === 'admin' || roleName === 'superAdmin';
   }
 
   // ---------------------------------------------------------------------------

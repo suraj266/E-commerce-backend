@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -29,19 +30,23 @@ import { config } from '@/common/config/config';
 import { EmailService } from '@/modules/admin/email/email.service';
 
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const MAX_FAILED_LOGIN_ATTEMPTS = 5; // lock after this many consecutive failures
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15m auto-expiring lock (not permanent,
+// so it can't be used to DoS a victim)
 const PASSWORD_RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1h — short window
-                                                    // because anyone with
-                                                    // the token can take
-                                                    // over the account.
+// because anyone with
+// the token can take
+// over the account.
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly email: EmailService,
-  ) { }
+  ) {}
 
   // Common context applied to every email — domain-derived `shopName` could
   // come from a SiteSetting later; for now we derive a sane default.
@@ -61,15 +66,15 @@ export class AuthService {
    */
   async registerSeller(input: RegisterSellerDto) {
     const normalizedEmail = input.email.toLowerCase();
-    const normalizedPhone = input.phone.replace(/\s+/g, '').replace(/^\+91/, '');
+    const normalizedPhone = input.phone
+      .replace(/\s+/g, '')
+      .replace(/^\+91/, '');
 
     const sellerRole = await this.prisma.role.findUnique({
       where: { name: 'seller' },
     });
     if (!sellerRole) {
-      throw new BadRequestException(
-        'Seller role missing. Run prisma seed.',
-      );
+      throw new BadRequestException('Seller role missing. Run prisma seed.');
     }
 
     const [emailExists, phoneExists] = await Promise.all([
@@ -106,9 +111,11 @@ export class AuthService {
     return {
       message: 'Registration successful. Please verify your email.',
       userId: user.id,
-      // Dev convenience — exposes the token. Remove or gate by NODE_ENV in prod.
-      verificationToken: token,
-      verificationUrl,
+      // The token is delivered by email. It is only echoed in the response for
+      // local/staging convenience and is never exposed in production.
+      ...(config.NODE_ENV !== 'production'
+        ? { verificationToken: token, verificationUrl }
+        : {}),
     };
   }
 
@@ -133,9 +140,7 @@ export class AuthService {
       where: { name: 'customer' },
     });
     if (!customerRole) {
-      throw new BadRequestException(
-        'Customer role missing. Run prisma seed.',
-      );
+      throw new BadRequestException('Customer role missing. Run prisma seed.');
     }
 
     const emailExists = await this.prisma.user.findUnique({
@@ -171,9 +176,10 @@ export class AuthService {
     return {
       message: 'Registration successful. Please verify your email.',
       userId: user.id,
-      // Dev convenience — exposes the token. Gate by NODE_ENV in prod.
-      verificationToken: token,
-      verificationUrl,
+      // The token is delivered by email. Only echoed outside production.
+      ...(config.NODE_ENV !== 'production'
+        ? { verificationToken: token, verificationUrl }
+        : {}),
     };
   }
 
@@ -242,8 +248,10 @@ export class AuthService {
 
     return {
       message: 'Verification link sent.',
-      verificationToken: token,
-      verificationUrl,
+      // The token is delivered by email. Only echoed outside production.
+      ...(config.NODE_ENV !== 'production'
+        ? { verificationToken: token, verificationUrl }
+        : {}),
     };
   }
 
@@ -252,7 +260,9 @@ export class AuthService {
    * receive the email (typo / lost access) and the admin verified identity OOB.
    */
   async adminVerifyEmail(input: AdminVerifyEmailDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: input.userId } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: input.userId },
+    });
     if (!user) throw new NotFoundException('User not found');
     if (user.emailVerifiedAt) {
       return { message: 'Already verified', userId: user.id };
@@ -276,15 +286,46 @@ export class AuthService {
   async login(loginUserInput: LoginUserDto): Promise<LoginResponse> {
     const user = await this.prisma.user.findUnique({
       where: { email: loginUserInput.email.toLowerCase() },
-      include: { role: true }
-    })
+      include: { role: true },
+    });
+    // Generic message — never reveal whether the account exists (enumeration).
     if (!user) {
-      throw new NotFoundException("User not found")
+      throw new UnauthorizedException('Invalid email or password');
     }
-    const isMatch = await verify(user.password, loginUserInput.password)
+
+    // Per-account brute-force lockout. Independent of the coarse global
+    // throttler, this stops password-guessing against a single account.
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      throw new UnauthorizedException(
+        'Account temporarily locked due to failed login attempts. Please try again later.',
+      );
+    }
+
+    const isMatch = await verify(user.password, loginUserInput.password);
     if (!isMatch) {
-      throw new UnauthorizedException("Invalid password")
+      const attempts = (user.failedLoginAttempts ?? 0) + 1;
+      const shouldLock = attempts >= MAX_FAILED_LOGIN_ATTEMPTS;
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: shouldLock
+          ? {
+              failedLoginAttempts: 0,
+              lockedUntil: new Date(Date.now() + LOGIN_LOCKOUT_MS),
+            }
+          : { failedLoginAttempts: attempts },
+      });
+      throw new UnauthorizedException('Invalid email or password');
     }
+
+    // Correct credentials — clear any lockout state and record the login.
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: new Date(),
+      },
+    });
 
     // Account-type gate. The customer storefront, seller portal, and admin
     // panel each post their own `accountType` so users can't sign in with
@@ -306,7 +347,9 @@ export class AuthService {
     // Block unverified emails for non-admin roles. Admin role is pre-verified
     // via the seed, so this only affects sellers / customers.
     if (!user.emailVerifiedAt && user.role?.name !== 'superAdmin') {
-      throw new ForbiddenException('Please verify your email before logging in.');
+      throw new ForbiddenException(
+        'Please verify your email before logging in.',
+      );
     }
 
     const { id, name, email, role } = user;
@@ -322,13 +365,13 @@ export class AuthService {
         token: hashedRefreshToken,
         userId: id,
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-      }
+      },
     });
 
     return {
       accessToken,
       refreshToken,
-      user: { id, name, email, role: { id: role?.id, name: role?.name } }
+      user: { id, name, email, role: { id: role?.id, name: role?.name } },
     };
   }
 
@@ -382,9 +425,12 @@ export class AuthService {
       where: { userId: payload.sub },
     });
 
-    let matchedToken: typeof userTokens[0] | null = null;
+    let matchedToken: (typeof userTokens)[0] | null = null;
     for (const storedToken of userTokens) {
-      const isMatch = await verify(storedToken.token, refreshTokenDto.refreshToken);
+      const isMatch = await verify(
+        storedToken.token,
+        refreshTokenDto.refreshToken,
+      );
       if (isMatch) {
         matchedToken = storedToken;
         break;
@@ -392,8 +438,12 @@ export class AuthService {
     }
 
     if (!matchedToken) {
-      await this.prisma.refreshToken.deleteMany({ where: { userId: payload.sub } });
-      throw new UnauthorizedException('Refresh token not found. All sessions revoked.');
+      await this.prisma.refreshToken.deleteMany({
+        where: { userId: payload.sub },
+      });
+      throw new UnauthorizedException(
+        'Refresh token not found. All sessions revoked.',
+      );
     }
 
     if (matchedToken.expiresAt < new Date()) {
@@ -404,7 +454,10 @@ export class AuthService {
     await this.prisma.refreshToken.delete({ where: { id: matchedToken.id } });
 
     const newAccessToken = this.generateAccessToken(payload.sub, payload.email);
-    const newRefreshToken = this.generateRefreshToken(payload.sub, payload.email);
+    const newRefreshToken = this.generateRefreshToken(
+      payload.sub,
+      payload.email,
+    );
 
     const hashedNewRefreshToken = await hash(newRefreshToken);
     await this.prisma.refreshToken.create({
@@ -412,7 +465,7 @@ export class AuthService {
         token: hashedNewRefreshToken,
         userId: payload.sub,
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      }
+      },
     });
 
     return {
@@ -430,9 +483,14 @@ export class AuthService {
     });
 
     for (const storedToken of userTokens) {
-      const isMatch = await verify(storedToken.token, refreshTokenDto.refreshToken);
+      const isMatch = await verify(
+        storedToken.token,
+        refreshTokenDto.refreshToken,
+      );
       if (isMatch) {
-        await this.prisma.refreshToken.delete({ where: { id: storedToken.id } });
+        await this.prisma.refreshToken.delete({
+          where: { id: storedToken.id },
+        });
         return { message: 'Logged out successfully' };
       }
     }
@@ -486,11 +544,15 @@ export class AuthService {
       shopName: this.shopName,
     });
 
+    // The reset token is a direct account-takeover primitive and is NEVER
+    // returned in the API response (in any environment) — it is only delivered
+    // to the account's email. In development the link is logged server-side.
+    if (config.NODE_ENV !== 'production') {
+      this.logger.debug(`[dev] Password reset link for ${email}: ${resetUrl}`);
+    }
+
     return {
       message: 'If the email exists, a reset link was sent.',
-      // Dev convenience — strip these in prod (gate by NODE_ENV).
-      resetToken: token,
-      resetUrl,
     };
   }
 
@@ -553,7 +615,7 @@ export class AuthService {
         secret: config.JWT_SECRET,
         expiresIn: config.JWT_EXPIRES_IN,
         algorithm: config.JWT_ALGORITHM as any,
-      }
+      },
     );
   }
 
@@ -563,7 +625,7 @@ export class AuthService {
       {
         secret: config.REFRESH_TOKEN_SECRET,
         expiresIn: config.REFRESH_TOKEN_EXPIRES_IN as StringValue,
-      }
+      },
     );
   }
 }

@@ -6,19 +6,14 @@
  * gateway implementation.
  */
 
-import {
-  Controller,
-  Post,
-  Headers,
-  Req,
-  Res,
-  HttpCode,
-} from '@nestjs/common';
+import { Controller, Post, Headers, Req, Res, Logger } from '@nestjs/common';
 import { PaymentGateway } from '@prisma/client';
-import { PaymentService } from './payment.service';
+import { PaymentService, WebhookSignatureError } from './payment.service';
 
 @Controller('webhooks')
 export class PaymentWebhookController {
+  private readonly logger = new Logger(PaymentWebhookController.name);
+
   constructor(private readonly paymentService: PaymentService) {}
 
   /**
@@ -26,31 +21,55 @@ export class PaymentWebhookController {
    *
    * Razorpay sends events like `payment.captured`, `payment.failed` etc.
    * The signature is in the `x-razorpay-signature` header.
+   *
+   * Fail-closed status semantics:
+   *   - missing raw body / invalid signature → 4xx (never mark paid)
+   *   - unexpected/transient error           → 5xx (Razorpay retries)
+   *   - success or terminal duplicate        → 200
    */
   @Post('razorpay')
-  @HttpCode(200)
   async razorpayWebhook(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     @Req() req: any,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     @Res() res: any,
     @Headers('x-razorpay-signature') signature: string,
   ) {
-    try {
-      // req.rawBody is available when rawBody: true in NestJS bootstrap.
-      const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
+    // req.rawBody is populated when rawBody:true in bootstrap. If it's missing
+    // the HMAC cannot be verified over the exact signed bytes — fail closed
+    // rather than re-serialising the parsed body (which never byte-matches).
+    if (!req.rawBody || !Buffer.isBuffer(req.rawBody)) {
+      this.logger.error(
+        'Razorpay webhook received without a raw body — rejecting.',
+      );
+      return res
+        .status(400)
+        .json({ status: 'error', message: 'raw body unavailable' });
+    }
 
+    try {
       await this.paymentService.handleWebhook(
         PaymentGateway.RAZORPAY,
-        rawBody,
+        req.rawBody,
         signature ?? '',
         req.body,
       );
-      return res.json({ status: 'ok' });
+      return res.status(200).json({ status: 'ok' });
     } catch (error) {
-      // Always return 200 to Razorpay to avoid retries for known errors.
-      console.error('[Razorpay Webhook Error]', error);
-      return res.json({ status: 'error', message: (error as Error).message });
+      if (error instanceof WebhookSignatureError) {
+        this.logger.warn(
+          `Razorpay webhook signature rejected: ${error.message}`,
+        );
+        return res
+          .status(401)
+          .json({ status: 'error', message: 'invalid signature' });
+      }
+      // Transient/unexpected failure — return 5xx so Razorpay retries with backoff.
+      this.logger.error(
+        `Razorpay webhook processing failed: ${(error as Error).message}`,
+      );
+      return res
+        .status(500)
+        .json({ status: 'error', message: 'processing failed' });
     }
   }
 
@@ -58,8 +77,7 @@ export class PaymentWebhookController {
    * POST /webhooks/stripe — placeholder for future Stripe integration.
    */
   @Post('stripe')
-  @HttpCode(200)
   async stripeWebhook(@Res() res: any) {
-    return res.json({ status: 'not_implemented' });
+    return res.status(200).json({ status: 'not_implemented' });
   }
 }

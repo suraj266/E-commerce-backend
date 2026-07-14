@@ -28,6 +28,12 @@ export interface CreateSessionInput {
   customerPhone?: string;
   customerName?: string;
   description?: string;
+  /**
+   * When set, reuse this existing gateway order id (from a prior checkout
+   * attempt for the same order) instead of creating a new one — avoids
+   * spawning a second live payment session on a retry.
+   */
+  existingGatewayOrderId?: string;
 }
 
 export interface PaymentSessionResult {
@@ -57,6 +63,17 @@ export interface RefundResult {
   status: string;
 }
 
+/** Authoritative payment state fetched directly from the gateway. */
+export interface FetchedPayment {
+  /** Captured amount in the gateway's minor unit (paise for INR). */
+  amount: number;
+  currency: string;
+  /** Gateway status, e.g. 'captured' | 'authorized' | 'failed'. */
+  status: string;
+  /** Gateway order id this payment belongs to, when available. */
+  gatewayOrderId?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Strategy interface
 // ---------------------------------------------------------------------------
@@ -79,6 +96,19 @@ export interface IPaymentGateway {
 
   /** Verify an incoming webhook's authenticity via its signature header. */
   verifyWebhook(rawBody: Buffer, signature: string): boolean;
+
+  /**
+   * Fetch the authoritative captured state of a single payment from the
+   * gateway. Used to assert the paid amount/currency before marking an order
+   * PAID (defence against amount tampering / underpayment).
+   */
+  fetchPayment(gatewayPaymentId: string): Promise<FetchedPayment>;
+
+  /**
+   * Fetch all payments recorded against a gateway order id. Used by the
+   * reconciliation cron to recover a capture whose webhook/verify was missed.
+   */
+  fetchOrderPayments(gatewayOrderId: string): Promise<FetchedPayment[]>;
 
   /** Issue a full or partial refund. */
   refund(input: RefundInput): Promise<RefundResult>;

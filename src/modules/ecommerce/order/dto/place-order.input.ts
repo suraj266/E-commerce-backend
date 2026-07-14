@@ -64,4 +64,15 @@ export class PlaceOrderInput {
     message: 'buyerGstin must be a valid 15-char India GSTIN',
   })
   buyerGstin?: string;
+
+  /**
+   * Idempotency key — a UUID the client generates once per checkout attempt and
+   * reuses on retry. Guards against double-submit / network-retry creating
+   * duplicate orders (see OrderPlacementService.placeOrder). Optional for
+   * backward compatibility; when omitted no idempotency protection applies.
+   */
+  @Field(() => String, { nullable: true })
+  @IsOptional()
+  @IsUUID()
+  clientRequestId?: string;
 }

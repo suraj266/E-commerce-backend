@@ -55,4 +55,14 @@ export class InitiateCheckoutInput {
     message: 'buyerGstin must be a valid 15-char India GSTIN',
   })
   buyerGstin?: string;
+
+  /**
+   * Idempotency key — a UUID generated once per checkout attempt and reused on
+   * retry, so a double-submit doesn't create a duplicate order / double-reserve
+   * stock. Forwarded to OrderPlacementService.placeOrder.
+   */
+  @Field(() => String, { nullable: true })
+  @IsOptional()
+  @IsUUID()
+  clientRequestId?: string;
 }

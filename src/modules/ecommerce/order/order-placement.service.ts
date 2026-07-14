@@ -48,11 +48,17 @@
 
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, OrderStatus, PaymentStatus, PaymentMethod } from '@prisma/client';
+import {
+  Prisma,
+  OrderStatus,
+  PaymentStatus,
+  PaymentMethod,
+} from '@prisma/client';
 import { Logger } from '@nestjs/common';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
@@ -60,6 +66,7 @@ import { CouponService } from '@/modules/ecommerce/coupon/coupon.service';
 import { config } from '@/common/config/config';
 import { PlaceOrderInput } from './dto/place-order.input';
 import { generateOrderNumber } from './order.helpers';
+import { isIdempotencyConflict } from './order-idempotency.util';
 import { ORDER_INCLUDE, hydrateOrder } from './order.hydrate';
 import {
   fromInclusiveMrp,
@@ -75,7 +82,10 @@ import {
   parseShippingConfig,
   type ShippingConfig,
 } from '@/modules/ecommerce/shipping/shipping-rate';
-import { CourierService, type ResolvedRate } from '@/modules/ecommerce/courier/courier.service';
+import {
+  CourierService,
+  type ResolvedRate,
+} from '@/modules/ecommerce/courier/courier.service';
 import { resolveState, GST_STATES } from '@/common/constants/gst-states';
 
 interface InventoryDeduction {
@@ -150,7 +160,9 @@ export class OrderPlacementService {
       select: { id: true, deletedAt: true },
     });
     if (!customer) {
-      throw new ForbiddenException('Checkout is only available to customer accounts.');
+      throw new ForbiddenException(
+        'Checkout is only available to customer accounts.',
+      );
     }
     if (customer.deletedAt) {
       throw new ForbiddenException('This account has been archived.');
@@ -166,8 +178,36 @@ export class OrderPlacementService {
     userId: string,
     input: PlaceOrderInput,
     paymentStatus: PaymentStatus = PaymentStatus.PENDING,
+    opts: { allowPrepaid?: boolean } = {},
   ) {
+    // The raw placeOrder path may only place COD orders. Prepaid orders MUST
+    // go through PaymentService.initiateCheckout (which opens a payment session
+    // and sets AWAITING_PAYMENT) — otherwise a client could get a fully-placed
+    // prepaid order with reserved stock and no payment. initiateCheckout opts in
+    // with { allowPrepaid: true }.
+    if (!opts.allowPrepaid && input.paymentMethod !== PaymentMethod.COD) {
+      throw new BadRequestException(
+        'Only Cash on Delivery can be placed directly; choose an online payment method at checkout.',
+      );
+    }
+
     const customerId = await this.getCustomerId(userId);
+
+    // Idempotent replay: if this exact checkout attempt (same clientRequestId)
+    // already produced an order, return it instead of creating a duplicate and
+    // double-reserving stock.
+    if (input.clientRequestId) {
+      const existing = await this.prisma.order.findUnique({
+        where: {
+          customerId_idempotencyKey: {
+            customerId,
+            idempotencyKey: input.clientRequestId,
+          },
+        },
+        include: ORDER_INCLUDE,
+      });
+      if (existing) return hydrateOrder(existing);
+    }
 
     // ---- Step 1: Load cart with items + product/variant + tax ---------------
     const cart = await this.prisma.cart.findUnique({
@@ -175,9 +215,13 @@ export class OrderPlacementService {
       include: {
         items: {
           include: {
-            variant: { include: {
-              attributes: { include: { attribute: true, attributeValue: true } },
-            } },
+            variant: {
+              include: {
+                attributes: {
+                  include: { attribute: true, attributeValue: true },
+                },
+              },
+            },
             product: {
               include: {
                 tax: true,
@@ -201,7 +245,10 @@ export class OrderPlacementService {
       throw new NotFoundException('Shipping address not found.');
     }
     let billingAddress = shippingAddress;
-    if (input.billingAddressId && input.billingAddressId !== input.shippingAddressId) {
+    if (
+      input.billingAddressId &&
+      input.billingAddressId !== input.shippingAddressId
+    ) {
       const b = await this.prisma.userAddress.findUnique({
         where: { id: input.billingAddressId },
       });
@@ -215,10 +262,18 @@ export class OrderPlacementService {
     const planned: PlannedItem[] = [];
     for (const it of cart.items) {
       if (!it.variant || it.variant.deletedAt) {
-        throw new BadRequestException(`Variant ${it.variantId} is no longer available.`);
+        throw new BadRequestException(
+          `Variant ${it.variantId} is no longer available.`,
+        );
       }
-      if (!it.product || it.product.deletedAt || it.product.status !== 'ACTIVE') {
-        throw new BadRequestException(`"${it.product?.name ?? 'A product'}" is no longer available.`);
+      if (
+        !it.product ||
+        it.product.deletedAt ||
+        it.product.status !== 'ACTIVE'
+      ) {
+        throw new BadRequestException(
+          `"${it.product?.name ?? 'A product'}" is no longer available.`,
+        );
       }
       const deductions = await this.planInventoryDeductions(
         it.variantId,
@@ -301,11 +356,11 @@ export class OrderPlacementService {
     // `lineTaxable` is the pre-tax taxable value used for the GST calc and
     // is back-calculated from MRP when the product is inclusive.
     interface LineMath {
-      lineSubtotal: number;       // customer-facing (MRP*qty for inclusive)
-      lineTaxable: number;        // pre-tax taxable value (taxable before discount)
-      lineDiscount: number;       // share of the coupon's per-store discount
-      lineTaxableAfter: number;   // taxable - discount, fed into splitTax()
-      breakup: TaxBreakup;        // CGST/SGST or IGST breakdown for this line
+      lineSubtotal: number; // customer-facing (MRP*qty for inclusive)
+      lineTaxable: number; // pre-tax taxable value (taxable before discount)
+      lineDiscount: number; // share of the coupon's per-store discount
+      lineTaxableAfter: number; // taxable - discount, fed into splitTax()
+      breakup: TaxBreakup; // CGST/SGST or IGST breakdown for this line
     }
     const lineMaths: LineMath[][] = []; // parallel to sellerOrderRows order
 
@@ -388,15 +443,15 @@ export class OrderPlacementService {
         storeName: store?.name ?? 'the seller',
         orderNumber: `SORD-${orderNumberSuffix}`,
         subtotal: round2(soSubtotal),
-        taxAmount: 0,        // filled in step 4c
-        discountAmount: 0,   // filled in step 4c
+        taxAmount: 0, // filled in step 4c
+        discountAmount: 0, // filled in step 4c
         commissionAmount: 0, // filled in step 4c
-        payoutAmount: 0,     // filled in step 4c
-        shippingAmount: 0,   // filled in step 4c
-        shippingTaxable: 0,  // filled in step 4c
+        payoutAmount: 0, // filled in step 4c
+        shippingAmount: 0, // filled in step 4c
+        shippingTaxable: 0, // filled in step 4c
         shippingBreakup: splitTax(0, 0, taxKind), // filled in step 4c
         shippingRateSource: 'IN_HOUSE', // filled in step 4c
-        liveRate: null,      // filled in step 4b.1
+        liveRate: null, // filled in step 4b.1
         billableWeightKg: 0, // filled in step 4b.1
         sellerStateCode,
         taxKind,
@@ -472,7 +527,10 @@ export class OrderPlacementService {
     await Promise.all(
       sellerOrderRows.map(async (so) => {
         const billable = computeSellerShipping({
-          items: so.items.map((it) => ({ weight: it.weight, qty: it.quantity })),
+          items: so.items.map((it) => ({
+            weight: it.weight,
+            qty: it.quantity,
+          })),
           merchandiseSubtotal: so.subtotal,
           config: so.shippingConfig,
         }).billableWeightKg;
@@ -554,7 +612,9 @@ export class OrderPlacementService {
         merchandiseSubtotal: so.subtotal, // pre-discount, customer-facing
         config: so.shippingConfig,
       });
-      const shippingCharge = so.liveRate ? so.liveRate.rate : inhouse.shippingCharge;
+      const shippingCharge = so.liveRate
+        ? so.liveRate.rate
+        : inhouse.shippingCharge;
       so.shippingRateSource = so.liveRate ? 'LIVE' : 'IN_HOUSE';
       let shippingTaxable = 0;
       let shippingBreakup = splitTax(0, principalRate, so.taxKind);
@@ -568,7 +628,11 @@ export class OrderPlacementService {
       // charge (taxable + its GST). Shipping revenue accrues to the seller to
       // pay the courier; commission stays on the MERCHANDISE base only.
       const payoutAmount = round2(
-        soTaxableValue + soTax - commissionAmount + shippingTaxable + shippingTax,
+        soTaxableValue +
+          soTax -
+          commissionAmount +
+          shippingTaxable +
+          shippingTax,
       );
 
       so.taxAmount = round2(soTax + shippingTax); // full GST incl. shipping
@@ -623,170 +687,204 @@ export class OrderPlacementService {
     }
 
     // ---- Step 5: One transaction commits everything ------------------------
-    await this.prisma.$transaction(async (tx) => {
-      // (a) parent Order — also captures place-of-supply (CGST §12 trail)
-      //     and optional buyer GSTIN (B2B invoice flag) for downstream
-      //     invoice rendering.
-      await tx.order.create({
-        data: {
-          id: orderId,
-          orderNumber: parentOrderNumber,
-          customerId,
-          status: OrderStatus.PENDING,
-          paymentStatus,
-          paymentMethod: input.paymentMethod,
-          subtotal: round2(parentSubtotal),
-          taxAmount: round2(parentTax),
-          shippingAmount: round2(parentShipping),
-          discountAmount: round2(couponDiscount),
-          totalAmount: round2(totalAmount),
-          currencyCode: 'INR',
-          couponId: appliedCouponId,
-          couponCode: appliedCouponCode,
-          shippingAddressId: shippingAddress.id,
-          billingAddressId: billingAddress.id,
-          customerNotes: input.customerNotes ?? null,
-          buyerGstin: input.buyerGstin?.toUpperCase() ?? null,
-          placeOfSupplyStateCode: buyerStateCode,
-          placeOfSupplyStateName: buyerStateName,
-        },
-      });
-
-      // (a.1) Coupon redemption row — unique on orderId, guarantees idempotency.
-      if (appliedCouponId) {
-        await tx.couponRedemption.create({
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // (a) parent Order — also captures place-of-supply (CGST §12 trail)
+        //     and optional buyer GSTIN (B2B invoice flag) for downstream
+        //     invoice rendering.
+        await tx.order.create({
           data: {
-            couponId: appliedCouponId,
-            orderId,
+            id: orderId,
+            orderNumber: parentOrderNumber,
             customerId,
-            discountAmount: round2(couponDiscount),
-          },
-        });
-      }
-
-      // (b) SellerOrders + (c) OrderItems + (d) status history
-      for (let i = 0; i < sellerOrderRows.length; i++) {
-        const so = sellerOrderRows[i];
-        const maths = lineMaths[i];
-        await tx.sellerOrder.create({
-          data: {
-            id: so.id,
-            orderId,
-            sellerId: so.sellerId,
-            storeId: so.storeId,
-            orderNumber: so.orderNumber,
             status: OrderStatus.PENDING,
             paymentStatus,
-            subtotal: so.subtotal,
-            taxAmount: so.taxAmount,
-            shippingAmount: so.shippingAmount,
-            discountAmount: so.discountAmount,
-            commissionAmount: so.commissionAmount,
-            payoutAmount: so.payoutAmount,
+            paymentMethod: input.paymentMethod,
+            subtotal: round2(parentSubtotal),
+            taxAmount: round2(parentTax),
+            shippingAmount: round2(parentShipping),
+            discountAmount: round2(couponDiscount),
+            totalAmount: round2(totalAmount),
             currencyCode: 'INR',
-            // Persisted shipping tax breakup (composite supply) — the invoice
-            // reads these so its CGST/SGST/IGST totals tie to the grand total
-            // without recomputing the principal rate.
-            shippingTaxableValue: so.shippingTaxable,
-            shippingCgstAmount: so.shippingBreakup.cgstAmount,
-            shippingSgstAmount: so.shippingBreakup.sgstAmount,
-            shippingIgstAmount: so.shippingBreakup.igstAmount,
-            // Courier snapshot — so ship-time reuses the quoted courier.
-            shippingRateSource: so.shippingRateSource,
-            shippingProvider: so.liveRate?.provider ?? null,
-            selectedCourierId: so.liveRate?.courierId ?? null,
-            selectedCourierName: so.liveRate?.courierName ?? null,
-            quotedShippingRate: so.liveRate?.rate ?? null,
-            billableWeightKg: so.billableWeightKg,
-            // Mirror parent PoS — invoice rendering reads from SellerOrder
-            // so it can avoid the join.
+            couponId: appliedCouponId,
+            couponCode: appliedCouponCode,
+            shippingAddressId: shippingAddress.id,
+            billingAddressId: billingAddress.id,
+            customerNotes: input.customerNotes ?? null,
+            buyerGstin: input.buyerGstin?.toUpperCase() ?? null,
             placeOfSupplyStateCode: buyerStateCode,
             placeOfSupplyStateName: buyerStateName,
-            taxKind: so.taxKind,
+            // Idempotency key (nullable) — the @@unique([customerId, idempotencyKey])
+            // constraint makes a concurrent duplicate submit fail with P2002, which
+            // the caller catches and resolves to the winning order.
+            idempotencyKey: input.clientRequestId ?? null,
           },
         });
 
-        for (let j = 0; j < so.items.length; j++) {
-          const it = so.items[j];
-          const m = maths[j];
-          await tx.orderItem.create({
+        // (a.1) Coupon redemption row — unique on orderId, guarantees idempotency.
+        if (appliedCouponId) {
+          await tx.couponRedemption.create({
             data: {
+              couponId: appliedCouponId,
               orderId,
+              customerId,
+              discountAmount: round2(couponDiscount),
+            },
+          });
+        }
+
+        // (b) SellerOrders + (c) OrderItems + (d) status history
+        for (let i = 0; i < sellerOrderRows.length; i++) {
+          const so = sellerOrderRows[i];
+          const maths = lineMaths[i];
+          await tx.sellerOrder.create({
+            data: {
+              id: so.id,
+              orderId,
+              sellerId: so.sellerId,
+              storeId: so.storeId,
+              orderNumber: so.orderNumber,
+              status: OrderStatus.PENDING,
+              paymentStatus,
+              subtotal: so.subtotal,
+              taxAmount: so.taxAmount,
+              shippingAmount: so.shippingAmount,
+              discountAmount: so.discountAmount,
+              commissionAmount: so.commissionAmount,
+              payoutAmount: so.payoutAmount,
+              currencyCode: 'INR',
+              // Persisted shipping tax breakup (composite supply) — the invoice
+              // reads these so its CGST/SGST/IGST totals tie to the grand total
+              // without recomputing the principal rate.
+              shippingTaxableValue: so.shippingTaxable,
+              shippingCgstAmount: so.shippingBreakup.cgstAmount,
+              shippingSgstAmount: so.shippingBreakup.sgstAmount,
+              shippingIgstAmount: so.shippingBreakup.igstAmount,
+              // Courier snapshot — so ship-time reuses the quoted courier.
+              shippingRateSource: so.shippingRateSource,
+              shippingProvider: so.liveRate?.provider ?? null,
+              selectedCourierId: so.liveRate?.courierId ?? null,
+              selectedCourierName: so.liveRate?.courierName ?? null,
+              quotedShippingRate: so.liveRate?.rate ?? null,
+              billableWeightKg: so.billableWeightKg,
+              // Mirror parent PoS — invoice rendering reads from SellerOrder
+              // so it can avoid the join.
+              placeOfSupplyStateCode: buyerStateCode,
+              placeOfSupplyStateName: buyerStateName,
+              taxKind: so.taxKind,
+            },
+          });
+
+          for (let j = 0; j < so.items.length; j++) {
+            const it = so.items[j];
+            const m = maths[j];
+            await tx.orderItem.create({
+              data: {
+                orderId,
+                sellerOrderId: so.id,
+                productId: it.productId,
+                variantId: it.variantId,
+                storeId: it.storeId,
+                sku: it.sku,
+                name: it.name,
+                variantName: it.variantName,
+                quantity: it.quantity,
+                unitPrice: it.unitPrice,
+                // totalPrice = customer-facing line value (pre-discount) =
+                // pre-tax base × qty. The customer's parent subtotal sums these;
+                // GST is added on top at the order level.
+                totalPrice: round2(m.lineSubtotal),
+                // Legacy aggregate field — kept in sync with sum of breakup.
+                taxAmount: round2(m.breakup.totalTax),
+                discountAmount: m.lineDiscount,
+                attributesSnapshot:
+                  it.attributesSnapshot as unknown as Prisma.InputJsonValue,
+                imageUrlSnapshot: it.imageUrlSnapshot,
+                // Compliance snapshots: pinned for the lifetime of the order
+                // regardless of subsequent product edits.
+                hsnCode: it.hsnCode,
+                countryOfOrigin: it.countryOfOrigin,
+                priceTaxInclusive: it.priceTaxInclusive,
+                taxableValue: m.lineTaxableAfter,
+                cgstRate: m.breakup.cgstRate,
+                cgstAmount: m.breakup.cgstAmount,
+                sgstRate: m.breakup.sgstRate,
+                sgstAmount: m.breakup.sgstAmount,
+                igstRate: m.breakup.igstRate,
+                igstAmount: m.breakup.igstAmount,
+                cessRate: m.breakup.cessRate,
+                cessAmount: m.breakup.cessAmount,
+              },
+            });
+          }
+
+          await tx.orderStatusHistory.create({
+            data: {
               sellerOrderId: so.id,
-              productId: it.productId,
-              variantId: it.variantId,
-              storeId: it.storeId,
-              sku: it.sku,
-              name: it.name,
-              variantName: it.variantName,
-              quantity: it.quantity,
-              unitPrice: it.unitPrice,
-              // totalPrice = customer-facing line value (pre-discount) =
-              // pre-tax base × qty. The customer's parent subtotal sums these;
-              // GST is added on top at the order level.
-              totalPrice: round2(m.lineSubtotal),
-              // Legacy aggregate field — kept in sync with sum of breakup.
-              taxAmount: round2(m.breakup.totalTax),
-              discountAmount: m.lineDiscount,
-              attributesSnapshot:
-                it.attributesSnapshot as unknown as Prisma.InputJsonValue,
-              imageUrlSnapshot: it.imageUrlSnapshot,
-              // Compliance snapshots: pinned for the lifetime of the order
-              // regardless of subsequent product edits.
-              hsnCode: it.hsnCode,
-              countryOfOrigin: it.countryOfOrigin,
-              priceTaxInclusive: it.priceTaxInclusive,
-              taxableValue: m.lineTaxableAfter,
-              cgstRate: m.breakup.cgstRate,
-              cgstAmount: m.breakup.cgstAmount,
-              sgstRate: m.breakup.sgstRate,
-              sgstAmount: m.breakup.sgstAmount,
-              igstRate: m.breakup.igstRate,
-              igstAmount: m.breakup.igstAmount,
-              cessRate: m.breakup.cessRate,
-              cessAmount: m.breakup.cessAmount,
+              toStatus: OrderStatus.PENDING,
+              changedById: userId,
+              notes: 'Order placed',
             },
           });
         }
 
         await tx.orderStatusHistory.create({
           data: {
-            sellerOrderId: so.id,
+            orderId,
             toStatus: OrderStatus.PENDING,
             changedById: userId,
             notes: 'Order placed',
           },
         });
-      }
 
-      await tx.orderStatusHistory.create({
-        data: {
-          orderId,
-          toStatus: OrderStatus.PENDING,
-          changedById: userId,
-          notes: 'Order placed',
-        },
-      });
+        // (e) Inventory deductions: qtyAvailable → qtyReserved + movements.
+        //
+        // Flatten every deduction and sort by inventoryId so concurrent orders
+        // always take row locks in the same global order (deadlock avoidance).
+        // Each decrement is CONDITIONAL — `WHERE quantityAvailable >= qty` — so
+        // two checkouts racing for the last unit can never both succeed (the
+        // previous unconditional decrement drove stock negative = oversell).
+        // RETURNING gives the exact post-decrement value for an accurate audit
+        // row; the pre-transaction plan's before/after could be stale.
+        const deductions = planned
+          .flatMap((p) =>
+            p.deductions.map((d) => ({
+              ...d,
+              variantId: p.variantId,
+              name: p.name,
+            })),
+          )
+          .sort((a, b) =>
+            a.inventoryId < b.inventoryId
+              ? -1
+              : a.inventoryId > b.inventoryId
+                ? 1
+                : 0,
+          );
 
-      // (e) Inventory deductions: qtyAvailable → qtyReserved + movements
-      for (const p of planned) {
-        for (const d of p.deductions) {
-          await tx.inventory.update({
-            where: { id: d.inventoryId },
-            data: {
-              quantityAvailable: { decrement: d.quantity },
-              quantityReserved: { increment: d.quantity },
-            },
-          });
+        for (const d of deductions) {
+          const rows = await tx.$queryRaw<{ quantityAvailable: number }[]>`
+          UPDATE "Inventory"
+             SET "quantityAvailable" = "quantityAvailable" - ${d.quantity},
+                 "quantityReserved"  = "quantityReserved"  + ${d.quantity}
+           WHERE "id" = ${d.inventoryId} AND "quantityAvailable" >= ${d.quantity}
+           RETURNING "quantityAvailable"`;
+          if (rows.length !== 1) {
+            throw new ConflictException(
+              `"${d.name}" just went out of stock. Please review your cart and try again.`,
+            );
+          }
+          const after = Number(rows[0].quantityAvailable);
+          const before = after + d.quantity;
           await tx.inventoryMovement.create({
             data: {
               inventoryId: d.inventoryId,
-              variantId: p.variantId,
+              variantId: d.variantId,
               warehouseId: d.warehouseId,
               movementType: 'sale',
               quantityChange: -d.quantity,
-              quantityBefore: d.before,
-              quantityAfter: d.after,
+              quantityBefore: before,
+              quantityAfter: after,
               referenceType: 'order',
               referenceId: orderId,
               createdById: userId,
@@ -794,16 +892,33 @@ export class OrderPlacementService {
             },
           });
         }
-      }
 
-      // (f) Clear cart contents (keep the Cart row so future adds reuse it).
-      // For PREPAID orders the cart is cleared only once payment is captured
-      // (PaymentService), NOT here — so if the customer cancels/fails payment
-      // their cart stays intact for an easy retry. COD/immediate orders clear now.
-      if (paymentStatus !== PaymentStatus.AWAITING_PAYMENT) {
-        await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+        // (f) Clear cart contents (keep the Cart row so future adds reuse it).
+        // For PREPAID orders the cart is cleared only once payment is captured
+        // (PaymentService), NOT here — so if the customer cancels/fails payment
+        // their cart stays intact for an easy retry. COD/immediate orders clear now.
+        if (paymentStatus !== PaymentStatus.AWAITING_PAYMENT) {
+          await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+        }
+      });
+    } catch (err) {
+      // A duplicate submit that lost the race raises P2002 on the idempotency
+      // index (only) — resolve it to the winning order rather than erroring.
+      // Any other unique violation (orderNumber, etc.) must propagate.
+      if (input.clientRequestId && isIdempotencyConflict(err)) {
+        const existing = await this.prisma.order.findUnique({
+          where: {
+            customerId_idempotencyKey: {
+              customerId,
+              idempotencyKey: input.clientRequestId,
+            },
+          },
+          include: ORDER_INCLUDE,
+        });
+        if (existing) return hydrateOrder(existing);
       }
-    });
+      throw err;
+    }
 
     // ---- Step 6: Return the freshly hydrated parent Order ------------------
     const fresh = await this.prisma.order.findUnique({
@@ -902,10 +1017,7 @@ export class OrderPlacementService {
       where: { variantId, deletedAt: null, quantityAvailable: { gt: 0 } },
       orderBy: { quantityAvailable: 'desc' },
     });
-    const totalAvailable = rows.reduce(
-      (s, r) => s + r.quantityAvailable,
-      0,
-    );
+    const totalAvailable = rows.reduce((s, r) => s + r.quantityAvailable, 0);
     if (totalAvailable < quantity) {
       throw new BadRequestException(
         `Not enough stock for one of the items (need ${quantity}, have ${totalAvailable}).`,

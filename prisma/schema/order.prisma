@@ -90,6 +90,12 @@ model Order {
   internalNotes String?
   metadata      Json    @default("{}")
 
+  /// Idempotency key — a per-checkout-attempt UUID sent by the client. The
+  /// @@unique([customerId, idempotencyKey]) constraint below makes a duplicate
+  /// submit fail with P2002, which placement resolves to the original order.
+  /// Nullable: legacy/no-key calls don't collide (Postgres NULLs are distinct).
+  idempotencyKey String?
+
   /// Optional buyer GSTIN — captured at checkout if customer ticks
   /// "buying for business". Persisted on Order (parent), surfaced on
   /// every SellerOrder's invoice as the recipient GSTIN.
@@ -119,6 +125,7 @@ model Order {
   couponRedemption CouponRedemption?
   reviews          Review[]
 
+  @@unique([customerId, idempotencyKey])
   @@index([customerId])
   @@index([status])
   @@index([placedAt])

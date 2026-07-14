@@ -41,6 +41,7 @@ import { PaymentService } from './payment.service';
 import { PaymentResolver } from './payment.resolver';
 import { PaymentAdminResolver } from './payment-admin.resolver';
 import { PaymentWebhookController } from './payment-webhook.controller';
+import { PaymentReconciliationCron } from './payment-reconciliation.cron';
 
 @Module({
   imports: [ConfigModule, OrderModule, InvoiceModule],
@@ -68,6 +69,7 @@ import { PaymentWebhookController } from './payment-webhook.controller';
     PaymentService,
     PaymentResolver,
     PaymentAdminResolver,
+    PaymentReconciliationCron,
   ],
   exports: [PaymentService, PaymentConfigService],
 })

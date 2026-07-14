@@ -15,6 +15,11 @@ model User {
   phoneVerifiedAt DateTime?
   status          String?   @default("active")
 
+  // Per-account brute-force lockout (see AuthService.login). Reset on a
+  // successful login; `lockedUntil` auto-expires so a lock is never permanent.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
   // Nayi fields for scaling
   metadata  Json     @default("{}")
   updatedAt DateTime @updatedAt

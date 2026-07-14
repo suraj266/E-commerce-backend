@@ -16,6 +16,9 @@ model Inventory {
   warehouse Warehouse           @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
   movements InventoryMovement[]
 
+  // A raw-SQL CHECK ("quantityAvailable" >= 0 AND "quantityReserved" >= 0) is
+  // added by migration 20260708000000 as a non-negative-stock backstop. Prisma
+  // does not model CHECK constraints, so it lives only in the migration.
   @@unique([variantId, warehouseId])
 }
 

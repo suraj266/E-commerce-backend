@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { mockDeep } from 'jest-mock-extended';
 import { CategoryService } from './category.service';
 
 describe('CategoryService', () => {
@@ -7,7 +8,9 @@ describe('CategoryService', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [CategoryService],
-    }).compile();
+    })
+      .useMocker(() => mockDeep())
+      .compile();
 
     service = module.get<CategoryService>(CategoryService);
   });

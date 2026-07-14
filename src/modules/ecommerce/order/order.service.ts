@@ -46,7 +46,9 @@ export class OrderService {
       select: { id: true, deletedAt: true },
     });
     if (!customer) {
-      throw new ForbiddenException('Orders are only available to customer accounts.');
+      throw new ForbiddenException(
+        'Orders are only available to customer accounts.',
+      );
     }
     if (customer.deletedAt) {
       throw new ForbiddenException('This account has been archived.');
@@ -145,7 +147,8 @@ export class OrderService {
     if (
       order.sellerOrders.some(
         (so) =>
-          so.status !== OrderStatus.PENDING && so.status !== OrderStatus.CANCELLED,
+          so.status !== OrderStatus.PENDING &&
+          so.status !== OrderStatus.CANCELLED,
       )
     ) {
       throw new BadRequestException(
@@ -192,8 +195,12 @@ export class OrderService {
       // Release inventory: revert qtyReserved → qtyAvailable for every
       // movement we wrote at placement. Reading the original movements
       // tells us exactly which warehouse received which deductions.
+      // Ordered by inventoryId so this loop locks rows in the same global
+      // order as placement (order-placement.service.ts) — avoids deadlocks
+      // when a cancel races a concurrent placement on the same rows.
       const movements = await tx.inventoryMovement.findMany({
         where: { referenceType: 'order', referenceId: orderId },
+        orderBy: { inventoryId: 'asc' },
       });
       for (const m of movements) {
         // Original deduction was `quantityChange` (negative). Reverse it.
@@ -319,8 +326,11 @@ export class OrderService {
 
       // Release the inventory reserved at placement (same reversal as
       // cancelMyOrder — revert qtyReserved → qtyAvailable per movement).
+      // Ordered by inventoryId to lock rows in the same global order as
+      // placement (deadlock avoidance).
       const movements = await tx.inventoryMovement.findMany({
         where: { referenceType: 'order', referenceId: orderId },
+        orderBy: { inventoryId: 'asc' },
       });
       for (const m of movements) {
         const restore = Math.abs(m.quantityChange);

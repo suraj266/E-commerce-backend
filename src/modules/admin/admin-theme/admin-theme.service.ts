@@ -5,8 +5,10 @@ import { UpdateAdminThemeInput } from './dto/update-admin-theme.input';
 const SINGLETON_ID = 'global';
 
 const DEFAULTS = {
-  primaryLight: 'oklch(0.205 0 0)',
-  primaryDark: 'oklch(0.922 0 0)',
+  // Brand indigo by default (matches the storefront --brand) so a fresh /
+  // reset admin panel is on-brand. Admins can still customize via the editor.
+  primaryLight: 'oklch(0.42 0.16 264)',
+  primaryDark: 'oklch(0.62 0.18 264)',
   accentLight: 'oklch(0.97 0 0)',
   accentDark: 'oklch(0.269 0 0)',
   sidebarLight: 'oklch(0.985 0 0)',

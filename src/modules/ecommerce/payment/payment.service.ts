@@ -34,6 +34,22 @@ import {
 import { InitiateCheckoutInput } from './dto/initiate-checkout.input';
 import { VerifyPaymentInput } from './dto/verify-payment.input';
 import { InvoiceService } from '../invoice/invoice.service';
+import { paidAmountMatches, expectedPaise } from './payment-amount.util';
+
+/**
+ * Thrown when a webhook fails signature verification. The controller maps this
+ * to HTTP 401 (distinct from a transient 5xx) so a forged/misconfigured webhook
+ * is rejected without ever marking an order paid.
+ */
+export class WebhookSignatureError extends Error {
+  constructor(message = 'Invalid webhook signature.') {
+    super(message);
+    this.name = 'WebhookSignatureError';
+  }
+}
+
+/** Only reconcile payments older than this — avoids racing an in-flight verify. */
+const PAYMENT_RECONCILE_GRACE_MS = 10 * 60 * 1000; // 10 minutes
 
 @Injectable()
 export class PaymentService {
@@ -61,10 +77,15 @@ export class PaymentService {
       .then((order) => {
         if (!order) return;
         return this.prisma.cart
-          .findUnique({ where: { customerId: order.customerId }, select: { id: true } })
+          .findUnique({
+            where: { customerId: order.customerId },
+            select: { id: true },
+          })
           .then((cart) => {
             if (!cart) return;
-            return this.prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+            return this.prisma.cartItem.deleteMany({
+              where: { cartId: cart.id },
+            });
           });
       })
       .catch((err) =>
@@ -99,6 +120,40 @@ export class PaymentService {
       });
   }
 
+  /**
+   * Single source of truth for "a capture succeeded": mark the Payment CAPTURED
+   * and the Order + SellerOrders PAID in one transaction, then kick off invoice
+   * generation and cart clearing. Shared by the verify path, the webhook path,
+   * and the reconciliation cron so all three behave identically and idempotently
+   * (callers must guard that the payment is not already CAPTURED before calling).
+   */
+  private async finalizeCapturedPayment(
+    payment: { id: string; orderId: string },
+    paymentUpdate: Prisma.PaymentUpdateInput,
+  ): Promise<void> {
+    await this.prisma.$transaction([
+      this.prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: PaymentTransactionStatus.CAPTURED,
+          capturedAt: new Date(),
+          ...paymentUpdate,
+        },
+      }),
+      this.prisma.order.update({
+        where: { id: payment.orderId },
+        data: { paymentStatus: PaymentStatus.PAID },
+      }),
+      this.prisma.sellerOrder.updateMany({
+        where: { orderId: payment.orderId },
+        data: { paymentStatus: PaymentStatus.PAID },
+      }),
+    ]);
+
+    this.generateInvoicesForOrder(payment.orderId);
+    this.clearCartForOrder(payment.orderId);
+  }
+
   // ---------------------------------------------------------------------------
   // Customer-facing
   // ---------------------------------------------------------------------------
@@ -131,7 +186,7 @@ export class PaymentService {
     const orderPaymentMethod: PaymentMethod =
       gatewayName === 'COD'
         ? PaymentMethod.COD
-        : (supportedMethods[0] as PaymentMethod) ?? PaymentMethod.CARD;
+        : ((supportedMethods[0] as PaymentMethod) ?? PaymentMethod.CARD);
 
     // Determine payment status based on gateway type
     const isCod = gatewayName === 'COD';
@@ -139,15 +194,24 @@ export class PaymentService {
       ? PaymentStatus.PENDING
       : PaymentStatus.AWAITING_PAYMENT;
 
-    // Create the order using existing placement service
-    const order = await this.placement.placeOrder(userId, {
-      shippingAddressId: input.shippingAddressId,
-      billingAddressId: input.billingAddressId,
-      paymentMethod: orderPaymentMethod,
-      customerNotes: input.customerNotes,
-      couponCode: input.couponCode,
-      buyerGstin: input.buyerGstin,
-    }, paymentStatus);
+    // Create the order using existing placement service. `allowPrepaid: true`
+    // authorises the non-COD status here (the raw placeOrder path is COD-only).
+    // `clientRequestId` makes a retried checkout resolve to the same order
+    // instead of creating a duplicate.
+    const order = await this.placement.placeOrder(
+      userId,
+      {
+        shippingAddressId: input.shippingAddressId,
+        billingAddressId: input.billingAddressId,
+        paymentMethod: orderPaymentMethod,
+        customerNotes: input.customerNotes,
+        couponCode: input.couponCode,
+        buyerGstin: input.buyerGstin,
+        clientRequestId: input.clientRequestId,
+      },
+      paymentStatus,
+      { allowPrepaid: true },
+    );
 
     // Calculate processing fee
     let processingFee = 0;
@@ -162,34 +226,63 @@ export class PaymentService {
     }
 
     const totalWithFee = Number(order.totalAmount) + processingFee;
+    const currency = order.currencyCode ?? 'INR';
 
-    // Create payment session with gateway
+    // Session reuse: if a retry lands here for an order that already has a live
+    // (CREATED, unexpired) payment for the same gateway + amount, reuse that
+    // session instead of opening a second one — otherwise two live gateway
+    // orders could both be paid (double charge).
+    let reusable = null as Awaited<
+      ReturnType<typeof this.prisma.payment.findFirst>
+    >;
+    if (!isCod) {
+      reusable = await this.prisma.payment.findFirst({
+        where: {
+          orderId: order.id,
+          gateway: gatewayName,
+          status: PaymentTransactionStatus.CREATED,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (reusable && Number(reusable.amount) !== totalWithFee) {
+        // Amount changed since the previous attempt (e.g. cart/coupon edited) —
+        // don't reuse a stale session.
+        reusable = null;
+      }
+    }
+
+    // Create payment session with gateway (reusing the prior gateway order id
+    // when we found a reusable payment).
     const session = await gateway.createSession({
       orderId: order.id,
       orderNumber: order.orderNumber,
       amount: totalWithFee,
-      currency: order.currencyCode ?? 'INR',
+      currency,
       method: orderPaymentMethod,
       description: `Order ${order.orderNumber}`,
+      existingGatewayOrderId: reusable?.gatewayOrderId ?? undefined,
     });
 
-    // Create Payment record
-    await this.prisma.payment.create({
-      data: {
-        orderId: order.id,
-        gateway: gatewayName,
-        method: orderPaymentMethod,
-        amount: totalWithFee,
-        processingFee,
-        currency: order.currencyCode ?? 'INR',
-        status: isCod
-          ? PaymentTransactionStatus.CAPTURED
-          : PaymentTransactionStatus.CREATED,
-        gatewayOrderId: session.gatewayOrderId,
-        expiresAt: session.expiresAt,
-        ...(isCod ? { capturedAt: new Date() } : {}),
-      },
-    });
+    // Create the Payment record only when not reusing an existing one.
+    if (!reusable) {
+      await this.prisma.payment.create({
+        data: {
+          orderId: order.id,
+          gateway: gatewayName,
+          method: orderPaymentMethod,
+          amount: totalWithFee,
+          processingFee,
+          currency,
+          status: isCod
+            ? PaymentTransactionStatus.CAPTURED
+            : PaymentTransactionStatus.CREATED,
+          gatewayOrderId: session.gatewayOrderId,
+          expiresAt: session.expiresAt,
+          ...(isCod ? { capturedAt: new Date() } : {}),
+        },
+      });
+    }
 
     return {
       orderId: order.id,
@@ -248,33 +341,34 @@ export class PaymentService {
       throw new BadRequestException('Payment verification failed.');
     }
 
-    // Update payment + order (+ sub-orders so the seller view reflects PAID)
-    await this.prisma.$transaction([
-      this.prisma.payment.update({
-        where: { id: payment.id },
-        data: {
-          status: PaymentTransactionStatus.CAPTURED,
-          gatewayPaymentId: input.gatewayPaymentId,
-          gatewaySignature: input.gatewaySignature,
-          capturedAt: new Date(),
-        },
-      }),
-      this.prisma.order.update({
-        where: { id: input.orderId },
-        data: { paymentStatus: PaymentStatus.PAID },
-      }),
-      this.prisma.sellerOrder.updateMany({
-        where: { orderId: input.orderId },
-        data: { paymentStatus: PaymentStatus.PAID },
-      }),
-    ]);
+    // Signature only proves the payment id is bound to the order id — it does
+    // NOT prove the correct amount was paid. Fetch the authoritative captured
+    // state from the gateway and fail closed on any mismatch (underpayment /
+    // tampering / wrong currency / not actually captured).
+    const fetched = await gateway.fetchPayment(input.gatewayPaymentId);
+    if (fetched.status !== 'captured') {
+      throw new BadRequestException(
+        `Payment is not captured (gateway status: ${fetched.status}).`,
+      );
+    }
+    if (
+      payment.gatewayOrderId &&
+      fetched.gatewayOrderId &&
+      fetched.gatewayOrderId !== payment.gatewayOrderId
+    ) {
+      throw new BadRequestException('Payment does not belong to this order.');
+    }
+    if (!paidAmountMatches(fetched.amount, fetched.currency, payment)) {
+      this.logger.error(
+        `Amount mismatch on verify for order ${input.orderId}: gateway paid ${fetched.amount} ${fetched.currency}, expected ${expectedPaise(payment.amount)} ${payment.currency}`,
+      );
+      throw new BadRequestException('Payment amount mismatch.');
+    }
 
-    // Phase 1: payment captured → generate the tax invoice per
-    // SellerOrder. Fire-and-forget; failures are logged but never
-    // delay returning the success ack to the customer.
-    this.generateInvoicesForOrder(input.orderId);
-    // Prepaid cart is cleared on capture (not at placement).
-    this.clearCartForOrder(input.orderId);
+    await this.finalizeCapturedPayment(payment, {
+      gatewayPaymentId: input.gatewayPaymentId,
+      gatewaySignature: input.gatewaySignature,
+    });
 
     return this.prisma.order.findUnique({ where: { id: input.orderId } });
   }
@@ -287,7 +381,7 @@ export class PaymentService {
     gatewayName: PaymentGateway,
     rawBody: Buffer,
     signature: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
     parsedBody: any,
   ) {
     const gateway = this.gatewayMap.get(gatewayName);
@@ -298,7 +392,7 @@ export class PaymentService {
     gateway.initialize(credentials);
 
     if (!gateway.verifyWebhook(rawBody, signature)) {
-      throw new BadRequestException('Invalid webhook signature.');
+      throw new WebhookSignatureError();
     }
 
     // Razorpay sends event: "payment.captured" / "payment.failed"
@@ -323,27 +417,24 @@ export class PaymentService {
     }
 
     if (event === 'payment.captured') {
-      await this.prisma.$transaction([
-        this.prisma.payment.update({
-          where: { id: payment.id },
-          data: {
-            status: PaymentTransactionStatus.CAPTURED,
-            gatewayPaymentId,
-            gatewayResponse: payloadEntity as unknown as Prisma.InputJsonValue,
-            capturedAt: new Date(),
-          },
-        }),
-        this.prisma.order.update({
-          where: { id: payment.orderId },
-          data: { paymentStatus: PaymentStatus.PAID },
-        }),
-        this.prisma.sellerOrder.updateMany({
-          where: { orderId: payment.orderId },
-          data: { paymentStatus: PaymentStatus.PAID },
-        }),
-      ]);
-      this.generateInvoicesForOrder(payment.orderId);
-      this.clearCartForOrder(payment.orderId);
+      // Assert the captured amount/currency before marking PAID. On mismatch do
+      // NOT mark the Payment FAILED — that would poison the idempotency guard
+      // above and swallow a later legitimate webhook for the same order. Instead
+      // leave the order AWAITING_PAYMENT and surface it for manual review.
+      const capturedPaise = Number(payloadEntity.amount);
+      const capturedCurrency = String(payloadEntity.currency ?? '');
+      if (!paidAmountMatches(capturedPaise, capturedCurrency, payment)) {
+        this.logger.error(
+          `Webhook amount mismatch for order ${payment.orderId}: captured ${capturedPaise} ${capturedCurrency}, ` +
+            `expected ${expectedPaise(payment.amount)} ${payment.currency}. Leaving order AWAITING_PAYMENT for manual review.`,
+        );
+        return;
+      }
+
+      await this.finalizeCapturedPayment(payment, {
+        gatewayPaymentId,
+        gatewayResponse: payloadEntity as unknown as Prisma.InputJsonValue,
+      });
     } else if (event === 'payment.failed') {
       await this.prisma.payment.update({
         where: { id: payment.id },
@@ -367,6 +458,103 @@ export class PaymentService {
           ),
         );
     }
+  }
+
+  /**
+   * Reconciliation backstop (invoked by PaymentReconciliationCron). Even with a
+   * working webhook, a missed/failed delivery or a lost verify call can leave an
+   * order stuck AWAITING_PAYMENT while the money was actually captured. This
+   * sweep recovers those:
+   *   Sweep A — online orders still AWAITING_PAYMENT with a CREATED payment
+   *             older than the grace window: ask the gateway whether the order
+   *             was in fact captured (amount re-verified) and finalize it.
+   *   Sweep B — PAID seller-orders whose tax invoice never generated: backfill.
+   * Idempotent: re-running never double-marks PAID or double-generates invoices.
+   */
+  async reconcilePendingPayments(): Promise<{
+    recovered: number;
+    invoicesBackfilled: number;
+  }> {
+    const cutoff = new Date(Date.now() - PAYMENT_RECONCILE_GRACE_MS);
+    const pending = await this.prisma.payment.findMany({
+      where: {
+        status: PaymentTransactionStatus.CREATED,
+        gateway: { not: PaymentGateway.COD },
+        createdAt: { lt: cutoff },
+        order: { paymentStatus: PaymentStatus.AWAITING_PAYMENT },
+      },
+      take: 200,
+    });
+
+    let recovered = 0;
+    for (const payment of pending) {
+      try {
+        const gateway = this.gatewayMap.get(payment.gateway);
+        if (!gateway || !payment.gatewayOrderId) continue;
+
+        const credentials = await this.configService.getDecryptedCredentials(
+          payment.gateway,
+        );
+        gateway.initialize(credentials);
+
+        const gwPayments = await gateway.fetchOrderPayments(
+          payment.gatewayOrderId,
+        );
+        const captured = gwPayments.find((p) => p.status === 'captured');
+        if (!captured) continue;
+
+        if (!paidAmountMatches(captured.amount, captured.currency, payment)) {
+          this.logger.error(
+            `Reconcile amount mismatch for order ${payment.orderId} — skipping (manual review).`,
+          );
+          continue;
+        }
+
+        // Re-check status inside the loop in case a webhook/verify won the race.
+        const fresh = await this.prisma.payment.findUnique({
+          where: { id: payment.id },
+          select: { status: true },
+        });
+        if (!fresh || fresh.status === PaymentTransactionStatus.CAPTURED)
+          continue;
+
+        await this.finalizeCapturedPayment(payment, {
+          gatewayResponse: captured as unknown as Prisma.InputJsonValue,
+        });
+        recovered++;
+        this.logger.warn(
+          `Reconciled webhook-missed capture for order ${payment.orderId}.`,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Reconcile failed for payment ${payment.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Sweep B — PAID seller-orders missing a tax invoice.
+    const missingInvoice = await this.prisma.sellerOrder.findMany({
+      where: {
+        paymentStatus: PaymentStatus.PAID,
+        invoiceNumber: null,
+        deletedAt: null,
+      },
+      select: { id: true },
+      take: 200,
+    });
+    let invoicesBackfilled = 0;
+    for (const so of missingInvoice) {
+      try {
+        await this.invoice.generateForSellerOrder(so.id);
+        invoicesBackfilled++;
+      } catch (err) {
+        this.logger.warn(
+          `Invoice backfill failed for seller-order ${so.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    return { recovered, invoicesBackfilled };
   }
 
   /**

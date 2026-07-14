@@ -1,14 +1,16 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { mockDeep } from 'jest-mock-extended';
 import { SellerResolver } from './seller.resolver';
-import { SellerService } from './seller.service';
 
 describe('SellerResolver', () => {
   let resolver: SellerResolver;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
-      providers: [SellerResolver, SellerService],
-    }).compile();
+      providers: [SellerResolver],
+    })
+      .useMocker(() => mockDeep())
+      .compile();
 
     resolver = module.get<SellerResolver>(SellerResolver);
   });

@@ -15,8 +15,11 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
+    it('returns the no-route envelope (root is not a real API route)', () => {
+      expect(appController.getHello()).toEqual({
+        success: false,
+        message: 'No route found for this request',
+      });
     });
   });
 });
