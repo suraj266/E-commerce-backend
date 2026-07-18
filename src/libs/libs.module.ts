@@ -1,4 +1,4 @@
-import { Module, OnModuleInit } from "@nestjs/common";
+import { Logger, Module, OnModuleInit } from "@nestjs/common";
 import { Graphql } from "./graphql.module";
 import { PinoLoggerModule } from "./pinoLogger.module";
 
@@ -9,7 +9,8 @@ import { PinoLoggerModule } from "./pinoLogger.module";
     ]
 })
 export class LibsModule implements OnModuleInit {
+    private readonly logger = new Logger(LibsModule.name);
     onModuleInit() {
-        console.log("LibsModule initialized ✅");
+        this.logger.log("LibsModule initialized ✅");
     }
 }

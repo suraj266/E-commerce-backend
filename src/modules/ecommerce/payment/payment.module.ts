@@ -21,6 +21,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { OrderModule } from '../order/order.module';
 import { InvoiceModule } from '../invoice/invoice.module';
+import { EmailModule } from '@/modules/admin/email/email.module';
 
 // Crypto
 import { CryptoService } from '@/common/crypto/crypto.service';
@@ -36,15 +37,18 @@ import {
 // Services
 import { PaymentConfigService } from './payment-config.service';
 import { PaymentService } from './payment.service';
+import { RefundService } from './refund.service';
 
 // Resolvers + Controller
 import { PaymentResolver } from './payment.resolver';
 import { PaymentAdminResolver } from './payment-admin.resolver';
+import { RefundResolver } from './refund.resolver';
+import { RefundAdminResolver } from './refund-admin.resolver';
 import { PaymentWebhookController } from './payment-webhook.controller';
 import { PaymentReconciliationCron } from './payment-reconciliation.cron';
 
 @Module({
-  imports: [ConfigModule, OrderModule, InvoiceModule],
+  imports: [ConfigModule, OrderModule, InvoiceModule, EmailModule],
   controllers: [PaymentWebhookController],
   providers: [
     CryptoService,
@@ -67,10 +71,13 @@ import { PaymentReconciliationCron } from './payment-reconciliation.cron';
     },
     PaymentConfigService,
     PaymentService,
+    RefundService,
     PaymentResolver,
     PaymentAdminResolver,
+    RefundResolver,
+    RefundAdminResolver,
     PaymentReconciliationCron,
   ],
-  exports: [PaymentService, PaymentConfigService],
+  exports: [PaymentService, PaymentConfigService, RefundService],
 })
 export class PaymentModule {}

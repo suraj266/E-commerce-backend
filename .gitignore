@@ -41,3 +41,5 @@ lerna-debug.log*
 src/graphql_schema/schema.gql
 
 /generated/prisma
+
+/docs

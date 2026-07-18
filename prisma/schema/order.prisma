@@ -124,6 +124,7 @@ model Order {
   payments        Payment[]
   couponRedemption CouponRedemption?
   reviews          Review[]
+  refunds          Refund[]
 
   @@unique([customerId, idempotencyKey])
   @@index([customerId])
@@ -225,6 +226,8 @@ model SellerOrder {
   store  Store  @relation(fields: [storeId], references: [id], onDelete: Restrict)
   items  OrderItem[]
   statusHistory OrderStatusHistory[]
+  refunds       Refund[]
+  payoutItem    PayoutItem?
 
   @@unique([orderId, sellerId])
   @@index([sellerId, status])

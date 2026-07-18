@@ -23,7 +23,18 @@ import type { Transporter } from 'nodemailer';
 
 import { PrismaService } from '@/prisma/prisma.service';
 import { SiteSettingService } from '@/modules/admin/site-setting/site-setting.service';
+import { getCorrelationId } from '@/common/context/request-context';
 import { EmailConfigService } from './email-config.service';
+
+/**
+ * SMTP socket timeouts (ms) so a dead/slow mail server can't hang a send
+ * indefinitely. Email is NOT safely idempotent (a timed-out send may have
+ * been delivered), so we bound the socket but NEVER auto-retry — the caller
+ * decides whether a failed send matters.
+ */
+const SMTP_CONNECTION_TIMEOUT_MS = 15_000;
+const SMTP_GREETING_TIMEOUT_MS = 10_000;
+const SMTP_SOCKET_TIMEOUT_MS = 20_000;
 
 export interface SendEmailContext {
   // Caller-supplied template variables. Handlebars renders these into the
@@ -293,6 +304,11 @@ export class EmailService {
         user: setting.username,
         pass: password,
       },
+      // Bound every phase of the SMTP conversation so a dead/slow server can't
+      // hang the send forever. No retry — email isn't safely idempotent.
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
       ...(setting.localDomain ? { name: setting.localDomain } : {}),
     });
   }
@@ -333,7 +349,10 @@ export class EmailService {
       return { sent: true, logId: log.id };
     } catch (err) {
       const msg = (err as Error).message;
-      this.logger.error(`Send failed for "${opts.templateKey}": ${msg}`);
+      const correlationId = getCorrelationId() ?? '-';
+      this.logger.error(
+        `Send failed for "${opts.templateKey}" (correlationId=${correlationId}): ${msg}`,
+      );
       const log = await this.recordLog(
         opts.templateKey,
         opts.to,

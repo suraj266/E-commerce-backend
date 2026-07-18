@@ -34,9 +34,17 @@ const permissions = [
     { module: "seller", action: "verify", description: "Verify or reject a seller" },
     // Payout Account Management
     { module: "payout", action: "create", description: "Create payout account" },
-    { module: "payout", action: "read", description: "Read payout account" },
+    { module: "payout", action: "read", description: "Read payout account + settlement runs" },
     { module: "payout", action: "update", description: "Update payout account" },
     { module: "payout", action: "delete", description: "Delete payout account" },
+    // Seller Settlement / Payout Runs (Phase 2 — money-out)
+    { module: "payout", action: "preview", description: "Preview an eligible seller payout run (dry run)" },
+    { module: "payout", action: "run", description: "Create a seller payout run (settle eligible orders)" },
+    { module: "payout", action: "disburse", description: "Mark a payout paid (UTR) or failed" },
+    // Refunds (Phase 2 — money-out)
+    { module: "refund", action: "read", description: "Read refunds (admin)" },
+    { module: "refund", action: "approve", description: "Approve and execute a buyer refund" },
+    { module: "refund", action: "reject", description: "Reject a pending refund request" },
     // Store Management
     { module: "store", action: "create", description: "Admin creates a Store under any seller" },
     { module: "store", action: "read", description: "Read any store (admin)" },

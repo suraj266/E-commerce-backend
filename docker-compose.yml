@@ -34,8 +34,11 @@ services:
       # Persisted across container restarts; ignored when IMAGE_PROVIDER=s3.
       - uploads_dev:/app/uploads
     
+    # Migrations are NOT run here — they run as a dedicated one-shot step
+    # (see docker-compose.prod.yml `migrate` service and docs/MIGRATIONS.md).
+    # This keeps schema changes off the app-boot path and out of a per-replica race.
     command: >
-      sh -c "npx prisma generate && npx prisma migrate deploy && npm run start:dev"
+      sh -c "npx prisma generate && npm run start:dev"
 
 # Persistent volumes
 volumes:

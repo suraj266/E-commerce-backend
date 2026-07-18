@@ -1,4 +1,5 @@
-import { Controller, Headers, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { Controller, Headers, HttpCode, Logger, Post, Req, Res } from '@nestjs/common';
+import { getCorrelationId } from '@/common/context/request-context';
 import { CourierService } from './courier.service';
 
 /**
@@ -15,6 +16,8 @@ import { CourierService } from './courier.service';
  */
 @Controller('webhooks')
 export class CourierWebhookController {
+  private readonly logger = new Logger(CourierWebhookController.name);
+
   constructor(private readonly courier: CourierService) {}
 
   @Post('courier')
@@ -30,7 +33,15 @@ export class CourierWebhookController {
       await this.courier.handleWebhook(req.body, apiKey ?? '');
       return res.json({ status: 'ok' });
     } catch (error) {
-      return res.json({ status: 'error', message: (error as Error).message });
+      // Still return 200 so providers don't retry-storm, but no longer swallow
+      // the failure silently: log it (with the correlation id) so it lands in
+      // the structured logs + Sentry pipeline and can actually be investigated.
+      const err = error as Error;
+      this.logger.error(
+        `Courier webhook processing failed (correlationId=${getCorrelationId() ?? 'n/a'}): ${err.message}`,
+        err.stack,
+      );
+      return res.json({ status: 'error', message: err.message });
     }
   }
 }

@@ -1,4 +1,6 @@
-import { Module } from "@nestjs/common";
+import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
+import { RequestContextMiddleware } from "./common/context/request-context";
+import { SentryShutdownService } from "./common/observability/sentry-shutdown.service";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
 import { UserModule } from './modules/identity/user/user.module';
@@ -29,6 +31,7 @@ import { WishlistModule } from './modules/ecommerce/wishlist/wishlist.module';
 import { CartModule } from './modules/ecommerce/cart/cart.module';
 import { OrderModule } from './modules/ecommerce/order/order.module';
 import { PaymentModule } from './modules/ecommerce/payment/payment.module';
+import { PayoutModule } from './modules/ecommerce/payout/payout.module';
 import { CouponModule } from './modules/ecommerce/coupon/coupon.module';
 import { ReviewModule } from './modules/ecommerce/review/review.module';
 import { InvoiceModule } from './modules/ecommerce/invoice/invoice.module';
@@ -89,6 +92,7 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
     CartModule,
     OrderModule,
     PaymentModule,
+    PayoutModule,
     CouponModule,
     ReviewModule,
     InvoiceModule,
@@ -111,7 +115,15 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
     DashboardModule,
   ],
   controllers: [AppController],
-  providers: [AppService, { provide: APP_GUARD, useClass: GqlThrottlerGuard }],
+  providers: [AppService, SentryShutdownService, { provide: APP_GUARD, useClass: GqlThrottlerGuard }],
 })
-export class AppModule { }
+export class AppModule implements NestModule {
+  // Registered here (in the root module) so it binds AFTER nestjs-pino's own
+  // request middleware — that ordering guarantees `req.id` (set by pino's
+  // genReqId) already exists when RequestContextMiddleware seeds it into the
+  // AsyncLocalStorage as the correlation id.
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestContextMiddleware).forRoutes('*');
+  }
+}
 

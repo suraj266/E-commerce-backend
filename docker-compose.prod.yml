@@ -1,0 +1,87 @@
+# Production stack. Bring up with:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Startup order (enforced by healthchecks + depends_on):
+#   db (healthy) -> migrate (runs `prisma migrate deploy` once, exits 0) -> backend
+#
+# Differences from the dev stack (docker-compose.dev.yml):
+#   - backend runs the PRODUCTION image stage (node dist/main, non-root, healthcheck)
+#     instead of the builder stage + start:dev watcher as root.
+#   - migrations run as a dedicated one-shot step, not on every app boot.
+#   - NODE_ENV=production (activates GraphiQL/introspection gating + pino JSON).
+#   - no source-code bind mount, no develop.watch.
+#
+# Pre-migration backup: take a DB snapshot/backup BEFORE this runs (managed-Postgres
+# automated snapshot, or scripts/backup/pg_backup.sh from a postgres-client context in
+# the deploy pipeline). See docs/DR-RUNBOOK.md and docs/MIGRATIONS.md.
+
+services:
+  db:
+    image: postgres:15
+    container_name: ecommerce_db_prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Not published to the host by default — reachable only on the compose network.
+    # Uncomment to expose on loopback only for admin access:
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # One-shot migration runner. Uses the builder stage (has the full toolchain +
+  # prisma CLI + prisma/migrations). Runs to completion and exits; the backend
+  # service waits for it via `service_completed_successfully`.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: ecommerce-backend:builder
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env.prod
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+    command: >
+      sh -c "npx prisma migrate deploy"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: ecommerce-backend:production
+    container_name: ecommerce_backend_prod
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env.prod
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+    ports:
+      - "${PORT}:${PORT}"
+    # Only needed when IMAGE_PROVIDER=local; harmless otherwise. No source mount.
+    volumes:
+      - uploads_prod:/app/uploads
+    # HEALTHCHECK is defined in the Dockerfile production stage (hits /health).
+
+volumes:
+  pgdata_prod:
+  uploads_prod:

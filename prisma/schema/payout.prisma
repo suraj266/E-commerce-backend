@@ -1,0 +1,84 @@
+/// =============================================================================
+/// Payout — seller settlement ledger (Phase 2, P2-02).
+/// =============================================================================
+///
+/// A Payout is one settlement run for a single seller: it aggregates the
+/// seller's eligible (DELIVERED + PAID + payoutStatus=PENDING + non-refunded)
+/// SellerOrders into a set of PayoutItems, nets out any PROCESSED refunds, and
+/// records the manual bank/UPI transfer (UTR) once finance disburses it.
+///
+/// Lifecycle:
+///   PROCESSING → PAID     (finance pastes the UTR into markPayoutPaid)
+///   PROCESSING → FAILED   (transfer failed; items deleted, orders reverted)
+///
+/// Hard settle-once guarantee: `PayoutItem.sellerOrderId @unique`. Two racing
+/// payout runs collide on this unique (P2002) — the loser skips that order,
+/// so a seller order is never settled twice.
+///
+/// Raw-SQL CHECKs (Payout.netAmount >= 0, PayoutItem.amount >= 0) live in the
+/// hand-authored migration — Prisma cannot model CHECK constraints.
+///
+/// Reuses the existing `PayoutStatus` enum (order.prisma).
+
+model Payout {
+  id       String       @id @default(uuid())
+  sellerId String
+  status   PayoutStatus @default(PROCESSING)
+
+  /// Sum of eligible seller-order payout amounts before refund netting.
+  grossAmount Decimal @db.Decimal(10, 2) @default(0)
+  /// Total PROCESSED-refund amount subtracted from the gross.
+  refundAdjustment Decimal @db.Decimal(10, 2) @default(0)
+  /// grossAmount − refundAdjustment. The amount actually transferred.
+  netAmount Decimal @db.Decimal(10, 2) @default(0)
+  currencyCode String @default("INR")
+
+  /// Optional settlement period bounds (for reporting / statements).
+  periodStart DateTime?
+  periodEnd   DateTime?
+
+  /// Bank/UPI transaction reference pasted by finance on disbursement.
+  utr         String?
+  providerRef String?
+  failureReason String?
+
+  /// Masked snapshot of the seller payout account used, captured at run time
+  /// so the ledger row is self-describing even if the account is later edited.
+  accountType         String?
+  accountHolderName   String?
+  accountNumberMasked String?
+  ifscCode            String?
+  upiId               String?
+
+  createdById String?
+  paidAt      DateTime?
+  failedAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  seller Seller       @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  items  PayoutItem[]
+
+  @@index([sellerId])
+  @@index([status])
+}
+
+model PayoutItem {
+  id       String @id @default(uuid())
+  payoutId String
+  /// @unique is the settle-at-most-once guarantee for a seller order.
+  sellerOrderId String @unique
+
+  /// Seller-order payout amount included in this run.
+  amount Decimal @db.Decimal(10, 2)
+  /// PROCESSED-refund amount attributed to this seller order at run time.
+  refundedAmount Decimal @db.Decimal(10, 2) @default(0)
+
+  createdAt DateTime @default(now())
+
+  payout      Payout      @relation(fields: [payoutId], references: [id], onDelete: Cascade)
+  sellerOrder SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+
+  @@index([payoutId])
+}

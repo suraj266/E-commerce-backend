@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   ConflictException,
   ForbiddenException,
@@ -8,9 +9,12 @@ import {
 import {
   BusinessType,
   Prisma,
+  Seller,
   SellerStatus,
 } from '@prisma/client';
 import { hash } from 'argon2';
+import { config } from '@/common/config/config';
+import { EmailService } from '@/modules/admin/email/email.service';
 import {
   findStateByCode,
   stateCodeFromGstin,
@@ -40,7 +44,12 @@ const ENTITY_BUSINESS_TYPES: BusinessType[] = [
 
 @Injectable()
 export class SellerService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(SellerService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Self-onboarding
@@ -294,7 +303,7 @@ export class SellerService {
       );
     }
 
-    return this.prisma.seller.update({
+    const updated = await this.prisma.seller.update({
       where: { id: sellerId },
       data: {
         overallStatus: SellerStatus.PENDING,
@@ -302,6 +311,16 @@ export class SellerService {
       },
       include: { payoutAccounts: { where: { deletedAt: null } } },
     });
+
+    // Alert admins that a new application is awaiting review. Fire-and-forget:
+    // a mail hiccup must never fail the seller's submit.
+    this.notifyAdminNewSeller(updated).catch((err) =>
+      this.logger.warn(
+        `admin_new_seller email failed: ${(err as Error).message}`,
+      ),
+    );
+
+    return updated;
   }
 
   // ---------------------------------------------------------------------------
@@ -430,7 +449,7 @@ export class SellerService {
         (seller.gstin ? updated.gstinVerifiedAt : true);
 
       if (allRequiredVerified) {
-        return this.prisma.seller.update({
+        const verified = await this.prisma.seller.update({
           where: { id: input.id },
           data: {
             overallStatus: SellerStatus.VERIFIED,
@@ -438,6 +457,16 @@ export class SellerService {
           },
           include: { payoutAccounts: { where: { deletedAt: null } } },
         });
+
+        // We only reach here from PENDING/UNDER_REVIEW, so this is a genuine
+        // first-time transition into VERIFIED — safe to notify without resend.
+        this.notifySellerKycApproved(verified).catch((err) =>
+          this.logger.warn(
+            `seller_kyc_approved email failed: ${(err as Error).message}`,
+          ),
+        );
+
+        return verified;
       }
 
       // First section verified → move from PENDING to UNDER_REVIEW
@@ -460,8 +489,8 @@ export class SellerService {
   }
 
   async setStatus(input: SetSellerStatusInput) {
-    await this.findOneOrThrow(input.id);
-    return this.prisma.seller.update({
+    const previous = await this.findOneOrThrow(input.id);
+    const updated = await this.prisma.seller.update({
       where: { id: input.id },
       data: {
         overallStatus: input.status,
@@ -473,6 +502,32 @@ export class SellerService {
       },
       include: { payoutAccounts: { where: { deletedAt: null } } },
     });
+
+    // Notify on genuine transitions only — the previous-status guards stop a
+    // re-verify / re-reject of an already-VERIFIED/REJECTED seller from
+    // re-sending. All sends are fire-and-forget so mail never blocks the admin.
+    if (
+      input.status === SellerStatus.VERIFIED &&
+      previous.overallStatus !== SellerStatus.VERIFIED
+    ) {
+      this.notifySellerKycApproved(updated).catch((err) =>
+        this.logger.warn(
+          `seller_kyc_approved email failed: ${(err as Error).message}`,
+        ),
+      );
+    }
+    if (
+      input.status === SellerStatus.REJECTED &&
+      previous.overallStatus !== SellerStatus.REJECTED
+    ) {
+      this.notifySellerKycRejected(updated, input.reason).catch((err) =>
+        this.logger.warn(
+          `seller_kyc_rejected email failed: ${(err as Error).message}`,
+        ),
+      );
+    }
+
+    return updated;
   }
 
   async remove(id: string) {
@@ -581,6 +636,89 @@ export class SellerService {
       throw new NotFoundException(`Seller ${id} not found`);
     }
     return seller;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle email notifiers (soft-fail, fire-and-forget — see call sites)
+  //
+  // Branding (platform_name / logo) is injected by EmailService from
+  // SiteSetting, so we never pass shopName here. The seller's contact email +
+  // name come from a scoped User lookup so we don't widen findOneOrThrow's
+  // include for every caller.
+  // ---------------------------------------------------------------------------
+
+  /** Owner account email + display name for a seller, via a scoped lookup. */
+  private async resolveSellerContact(
+    userId: string,
+  ): Promise<{ email: string | null; name: string | null }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true, name: true },
+    });
+    return { email: user?.email ?? null, name: user?.name ?? null };
+  }
+
+  private sellerDisplayName(
+    seller: Pick<Seller, 'displayName' | 'legalName'>,
+    fallbackName: string | null,
+  ): string {
+    return (
+      fallbackName || seller.displayName || seller.legalName || 'there'
+    );
+  }
+
+  /** seller_kyc_approved — sent to the seller on a first VERIFIED transition. */
+  private async notifySellerKycApproved(
+    seller: Pick<Seller, 'userId' | 'displayName' | 'legalName'>,
+  ): Promise<void> {
+    const { email, name } = await this.resolveSellerContact(seller.userId);
+    if (!email) return;
+    await this.email.send('seller_kyc_approved', email, {
+      sellerName: this.sellerDisplayName(seller, name),
+      dashboardLink: `${config.FRONTEND_URL ?? ''}/seller/dashboard`,
+    });
+  }
+
+  /** seller_kyc_rejected — sent to the seller with the admin's reason. */
+  private async notifySellerKycRejected(
+    seller: Pick<Seller, 'userId' | 'displayName' | 'legalName'>,
+    reason?: string | null,
+  ): Promise<void> {
+    const { email, name } = await this.resolveSellerContact(seller.userId);
+    if (!email) return;
+    await this.email.send('seller_kyc_rejected', email, {
+      sellerName: this.sellerDisplayName(seller, name),
+      rejectionReason: reason?.trim() || 'Please review your submitted details.',
+    });
+  }
+
+  /**
+   * admin_new_seller — alerts every active superAdmin that a DRAFT seller has
+   * submitted for review. No-op when no admin email is on file.
+   */
+  private async notifyAdminNewSeller(
+    seller: Pick<
+      Seller,
+      'userId' | 'displayName' | 'legalName' | 'businessType' | 'businessEmail'
+    >,
+  ): Promise<void> {
+    const admins = await this.prisma.user.findMany({
+      where: { role: { name: 'superAdmin' }, status: 'active' },
+      select: { email: true },
+    });
+    if (admins.length === 0) return;
+
+    const { email, name } = await this.resolveSellerContact(seller.userId);
+    const ctx = {
+      sellerName: this.sellerDisplayName(seller, name),
+      sellerEmail: email ?? seller.businessEmail,
+      businessType: seller.businessType,
+      reviewLink: `${config.FRONTEND_URL ?? ''}/admin/sellers`,
+    };
+    for (const a of admins) {
+      if (!a.email) continue;
+      await this.email.send('admin_new_seller', a.email, ctx);
+    }
   }
 
   private assertSignatoryRequired(input: CreateSellerInput) {

@@ -1,0 +1,70 @@
+/// =============================================================================
+/// Refund — money-out rail for buyer refunds (Phase 2, P2-01).
+/// =============================================================================
+///
+/// One Refund row per refund attempt against a captured Payment. A refund may
+/// target the whole parent Order (all seller slices) or a single SellerOrder.
+///
+/// Lifecycle:
+///   REQUESTED → (admin) → PROCESSING → PROCESSED   (gateway confirmed)
+///   REQUESTED → REJECTED                            (admin declines)
+///   PROCESSING → FAILED                             (gateway/webhook failure)
+///
+/// Safety design (mirrors the capture path in PaymentService):
+///   - PROCESSING is persisted BEFORE the gateway.refund() call so a crash
+///     between the call and the follow-up transaction is recoverable.
+///   - `gatewayRefundId @unique` is the idempotency guard: a double-approve
+///     collides on this unique index instead of issuing a second refund.
+///   - Restock is gated on the absence of prior `order_refund` inventory
+///     movements for this refund, so it runs exactly once.
+///
+/// Raw-SQL CHECK (amount > 0) lives in the hand-authored migration alongside
+/// the model migration — Prisma cannot model CHECK constraints.
+
+enum RefundStatus {
+  REQUESTED
+  REJECTED
+  PROCESSING
+  PROCESSED
+  FAILED
+  CANCELLED
+}
+
+model Refund {
+  id            String  @id @default(uuid())
+  orderId       String
+  /// Null → the refund spans the whole parent Order (every seller slice).
+  /// Set → the refund is scoped to a single SellerOrder.
+  sellerOrderId String?
+  paymentId     String
+
+  amount Decimal      @db.Decimal(10, 2)
+  reason String?
+  status RefundStatus @default(REQUESTED)
+
+  /// Whether the refunded lines should be returned to sellable inventory.
+  restock Boolean @default(false)
+
+  /// Gateway refund identifier (e.g. Razorpay rfnd_xxx). Unique so a duplicate
+  /// approve can never persist a second successful refund for the same money.
+  gatewayRefundId String? @unique
+
+  requestedById String?
+  approvedById  String?
+  failureReason String?
+
+  /// Raw gateway refund payload preserved for audit/debugging.
+  gatewayResponse Json @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerOrder SellerOrder? @relation(fields: [sellerOrderId], references: [id], onDelete: SetNull)
+  payment     Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([sellerOrderId])
+  @@index([paymentId])
+  @@index([status])
+}

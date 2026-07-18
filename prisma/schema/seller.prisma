@@ -70,6 +70,7 @@ model Seller {
   payoutAccounts  SellerPayoutAccount[]
   sellerOrders    SellerOrder[]
   courierAccounts CourierAccount[]
+  payouts         Payout[]
 }
 
 model SellerPayoutAccount {
@@ -92,4 +93,6 @@ model SellerPayoutAccount {
   deletedAt DateTime?
 
   seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  @@index([sellerId])
 }

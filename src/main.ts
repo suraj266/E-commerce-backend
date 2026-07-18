@@ -1,3 +1,6 @@
+// MUST be first: initialises Sentry (no-op when SENTRY_DSN is unset) before any
+// other module is imported so auto-instrumentation can hook NestJS/HTTP.
+import './instrument';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
@@ -18,6 +21,7 @@ async function bootstrap() {
     bufferLogs: true,
     rawBody: true,
   });
+  const logger = app.get(Logger);
   app.use(
     helmet({
       crossOriginEmbedderPolicy: false,
@@ -27,7 +31,7 @@ async function bootstrap() {
   app.use(compression());
   app.use(cookieParser());
   app.useGlobalInterceptors(new ResponseInterceptor());
-  app.useLogger(app.get(Logger));
+  app.useLogger(logger);
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -37,7 +41,14 @@ async function bootstrap() {
   );
   app.useGlobalFilters(new AllExceptionsFilter());
   app.enableCors({ origin: config.FRONTEND_URL, credentials: true });
-  await app.listen(config.PORT);
-  console.log(`Application is running on: ${await app.getUrl()}`);
+  // Register SIGTERM/SIGINT handlers so Nest lifecycle hooks fire on shutdown —
+  // in particular PrismaService.onModuleDestroy ($disconnect) and in-flight
+  // request draining, which matters for zero-downtime rolling deploys. This
+  // also fires SentryShutdownService.onApplicationShutdown, which flushes
+  // buffered Sentry events (no-op when the SDK is disabled).
+  app.enableShutdownHooks();
+  // Bind all interfaces so the container's port publish + healthcheck can reach it.
+  await app.listen(config.PORT, '0.0.0.0');
+  logger.log(`Application is running on: ${await app.getUrl()}`, 'Bootstrap');
 }
 bootstrap();

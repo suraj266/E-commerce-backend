@@ -9,6 +9,10 @@ export const config = {
     REFRESH_TOKEN_EXPIRES_IN: process.env.REFRESH_TOKEN_EXPIRES_IN as string,
     NODE_ENV: process.env.NODE_ENV as string,
     PORT: process.env.PORT as string,
+    // -- Observability (Sentry) -- all optional; unset ⇒ Sentry no-ops.
+    SENTRY_DSN: process.env.SENTRY_DSN as string | undefined,
+    SENTRY_ENVIRONMENT: process.env.SENTRY_ENVIRONMENT as string | undefined,
+    SENTRY_TRACES_SAMPLE_RATE: process.env.SENTRY_TRACES_SAMPLE_RATE as string | undefined,
 }
 
 export type Algorithm =

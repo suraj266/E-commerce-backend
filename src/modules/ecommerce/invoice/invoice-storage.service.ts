@@ -5,8 +5,16 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { promises as fs } from 'fs';
 import { join } from 'path';
+import { getCorrelationId } from '@/common/context/request-context';
+
+/** Per-attempt socket timeouts so a hung S3 connection can't block forever. */
+const S3_CONNECTION_TIMEOUT_MS = 5_000;
+const S3_REQUEST_TIMEOUT_MS = 30_000;
+/** Total attempts (initial + SDK's built-in retries) for transient S3 faults. */
+const S3_MAX_ATTEMPTS = 3;
 
 /**
  * Persists generated invoice PDFs to the configured backend.
@@ -57,6 +65,14 @@ export class InvoiceStorageService {
               'AWS_SECRET_ACCESS_KEY',
             ),
           },
+          // Bound each attempt's socket + cap retries so a hung S3 connection
+          // can't block invoice generation forever. PutObject is idempotent
+          // (same key overwrites), so the SDK's transient retries are safe.
+          maxAttempts: S3_MAX_ATTEMPTS,
+          requestHandler: new NodeHttpHandler({
+            connectionTimeout: S3_CONNECTION_TIMEOUT_MS,
+            requestTimeout: S3_REQUEST_TIMEOUT_MS,
+          }),
         }),
       };
     }
@@ -101,7 +117,7 @@ export class InvoiceStorageService {
       );
     } catch (err) {
       this.logger.error(
-        `S3 upload failed for invoice ${safeName}: ${(err as Error).message}`,
+        `S3 upload failed for invoice ${safeName} (correlationId=${getCorrelationId() ?? '-'}): ${(err as Error).message}`,
       );
       throw new InternalServerErrorException(
         'Failed to upload invoice PDF to storage',

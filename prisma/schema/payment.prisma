@@ -128,6 +128,7 @@ model Payment {
   updatedAt         DateTime                  @updatedAt
 
   order             Order                     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  refunds           Refund[]
 
   @@index([orderId])
   @@index([gatewayOrderId])

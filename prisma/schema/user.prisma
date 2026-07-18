@@ -94,6 +94,8 @@ model UserAddress {
   user                    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   ordersAsShippingAddress Order[] @relation("OrderShippingAddress")
   ordersAsBillingAddress  Order[] @relation("OrderBillingAddress")
+
+  @@index([userId])
 }
 
 model ApiKey {
@@ -104,6 +106,8 @@ model ApiKey {
   keyPrefix   String
   permissions Json   @default("[]")
   user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Session {
@@ -114,6 +118,9 @@ model Session {
   userAgent String?
   expiresAt DateTime
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model RefreshToken {
@@ -124,4 +131,6 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

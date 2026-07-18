@@ -35,6 +35,7 @@ import { InitiateCheckoutInput } from './dto/initiate-checkout.input';
 import { VerifyPaymentInput } from './dto/verify-payment.input';
 import { InvoiceService } from '../invoice/invoice.service';
 import { paidAmountMatches, expectedPaise } from './payment-amount.util';
+import { RefundService } from './refund.service';
 
 /**
  * Thrown when a webhook fails signature verification. The controller maps this
@@ -63,6 +64,7 @@ export class PaymentService {
     @Inject(PAYMENT_GATEWAY_MAP)
     private readonly gatewayMap: Map<string, IPaymentGateway>,
     private readonly invoice: InvoiceService,
+    private readonly refundService: RefundService,
   ) {}
 
   /**
@@ -393,6 +395,14 @@ export class PaymentService {
 
     if (!gateway.verifyWebhook(rawBody, signature)) {
       throw new WebhookSignatureError();
+    }
+
+    // Refund events (`refund.processed` / `refund.failed`) carry the refund
+    // entity under payload.refund.entity — route those to the RefundService.
+    const refundEntity = parsedBody?.payload?.refund?.entity;
+    if (refundEntity) {
+      await this.refundService.handleRefundWebhook(refundEntity);
+      return;
     }
 
     // Razorpay sends event: "payment.captured" / "payment.failed"

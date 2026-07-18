@@ -41,6 +41,21 @@ import {
   SHIPROCKET_STATUS_MAP,
   TOKEN_TTL_MS,
 } from '../courier.constants';
+import {
+  isTransientError,
+  withResilience,
+  withTimeout,
+} from '@/common/http/with-resilience';
+
+/** Read timeout budget — serviceability/track/login/label/listPickup. */
+const SHIPROCKET_READ_TIMEOUT_MS = 15_000;
+/**
+ * Write timeout budget — createShipment/assignAwb/schedulePickup/cancel/
+ * registerPickupLocation. Deliberately longer than reads and NEVER retried:
+ * a timed-out write may have succeeded server-side, so a retry risks a
+ * duplicate shipment/AWB/pickup.
+ */
+const SHIPROCKET_WRITE_TIMEOUT_MS = 20_000;
 
 interface ShiprocketCourier {
   courier_company_id: number | string;
@@ -70,7 +85,21 @@ export class ShiprocketProvider implements ICourierProvider {
 
   private async request<T = any>(
     path: string,
-    opts: { method?: string; token?: string | null; body?: unknown; query?: Record<string, unknown> } = {},
+    opts: {
+      method?: string;
+      token?: string | null;
+      body?: unknown;
+      query?: Record<string, unknown>;
+      /**
+       * Resilience mode:
+       *   - 'read'  → timeout + bounded jittered retry on 429/5xx/network faults
+       *               (idempotent GET-style calls; safe to retry).
+       *   - 'write' → timeout ONLY, never retried (a timed-out mutating call may
+       *               have succeeded server-side).
+       * Defaults to 'read'.
+       */
+      mode?: 'read' | 'write';
+    } = {},
   ): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
     if (opts.query) {
@@ -81,23 +110,45 @@ export class ShiprocketProvider implements ICourierProvider {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
 
-    const res = await fetch(url.toString(), {
-      method: opts.method ?? 'GET',
-      headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    const method = opts.method ?? 'GET';
+    const mode = opts.mode ?? 'read';
+    const label = `shiprocket ${method} ${path}`;
+
+    // One HTTP round-trip, cancellable via the resilience-supplied AbortSignal.
+    const doFetch = async (signal: AbortSignal): Promise<T> => {
+      const res = await fetch(url.toString(), {
+        method,
+        headers,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+        signal,
+      });
+      const text = await res.text();
+      let json: any = {};
+      try {
+        json = text ? JSON.parse(text) : {};
+      } catch {
+        json = { raw: text };
+      }
+      if (!res.ok) {
+        const msg = json?.message || json?.error || `Shiprocket ${path} failed (${res.status})`;
+        const err = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+        // Attach the status so isTransientError retries 429/5xx but never 4xx.
+        (err as any).status = res.status;
+        throw err;
+      }
+      return json as T;
+    };
+
+    if (mode === 'write') {
+      // Writes: bound the wall-clock only. NEVER retried.
+      return withTimeout(doFetch, { timeoutMs: SHIPROCKET_WRITE_TIMEOUT_MS, label });
+    }
+    return withResilience(doFetch, {
+      timeoutMs: SHIPROCKET_READ_TIMEOUT_MS,
+      retries: 2,
+      retryOn: isTransientError,
+      label,
     });
-    const text = await res.text();
-    let json: any = {};
-    try {
-      json = text ? JSON.parse(text) : {};
-    } catch {
-      json = { raw: text };
-    }
-    if (!res.ok) {
-      const msg = json?.message || json?.error || `Shiprocket ${path} failed (${res.status})`;
-      throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
-    }
-    return json as T;
   }
 
   // ---------------------------------------------------------------------------
@@ -211,6 +262,7 @@ export class ShiprocketProvider implements ICourierProvider {
       method: 'POST',
       token: ctx.token,
       body,
+      mode: 'write', // non-idempotent: a retry could create a duplicate shipment
     });
     const providerOrderId = data?.order_id ?? data?.data?.order_id;
     const providerShipmentId = data?.shipment_id ?? data?.data?.shipment_id;
@@ -228,6 +280,7 @@ export class ShiprocketProvider implements ICourierProvider {
       method: 'POST',
       token: ctx.token,
       body: { shipment_id: shipmentId, ...(courierId ? { courier_id: courierId } : {}) },
+      mode: 'write', // non-idempotent: a retry could assign/charge a second AWB
     });
     const resp = data?.response?.data ?? data?.data ?? data;
     const awb = resp?.awb_code ?? resp?.awb;
@@ -240,6 +293,7 @@ export class ShiprocketProvider implements ICourierProvider {
       method: 'POST',
       token: ctx.token,
       body: { shipment_id: [shipmentId] },
+      mode: 'write', // non-idempotent: a retry could schedule a duplicate pickup
     });
     return {
       scheduled: true,
@@ -284,6 +338,7 @@ export class ShiprocketProvider implements ICourierProvider {
         method: 'POST',
         token: ctx.token,
         body: { ids: [args.providerOrderId] },
+        mode: 'write', // mutating state change — never auto-retried
       });
     }
   }
@@ -317,6 +372,7 @@ export class ShiprocketProvider implements ICourierProvider {
     const data = await this.request<any>('/settings/company/addpickup', {
       method: 'POST',
       token: ctx.token,
+      mode: 'write', // non-idempotent: a retry could register a duplicate location
       body: {
         pickup_location: location.nickname,
         name: location.name,

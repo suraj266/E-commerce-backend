@@ -42,4 +42,5 @@ model RolePermission {
   permission Permission @relation(fields: [permissionId], references: [id])
 
   @@unique([roleId, permissionId])
+  @@index([permissionId])
 }

@@ -34,8 +34,6 @@ const REVIEW_INCLUDE = {
 const MAX_IMAGES_PER_REVIEW = 5;
 const MAX_VIDEOS_PER_REVIEW = 1;
 
-const SHOP_NAME = 'Trueway';
-
 @Injectable()
 export class ReviewService {
   private readonly logger = new Logger(ReviewService.name);
@@ -480,7 +478,6 @@ export class ReviewService {
           customerName: row.customer?.user?.name ?? 'there',
           productName: row.product?.name ?? 'your product',
           productLink: `${config.FRONTEND_URL ?? ''}/product/${row.product?.slug ?? ''}`,
-          shopName: SHOP_NAME,
         })
         .catch((err) =>
           this.logger.warn(
@@ -521,7 +518,6 @@ export class ReviewService {
           productName: row.product?.name ?? 'your product',
           productLink: `${config.FRONTEND_URL ?? ''}/product/${row.product?.slug ?? ''}`,
           reason: reason?.trim() || '',
-          shopName: SHOP_NAME,
         })
         .catch((err) =>
           this.logger.warn(
@@ -557,7 +553,6 @@ export class ReviewService {
       title: row.title ?? '',
       body: row.body,
       reviewLink,
-      shopName: SHOP_NAME,
     };
     for (const a of admins) {
       if (!a.email) continue;

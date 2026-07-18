@@ -33,4 +33,11 @@ export const envSchema = Joi.object({
     // 32-byte AES key (64 hex chars) for encrypting gateway credentials in DB.
     // Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
     PAYMENT_ENCRYPTION_KEY: Joi.string().length(64).required(),
+
+    // -- Observability (Sentry) --
+    // All optional: when SENTRY_DSN is unset the SDK initialises disabled and
+    // every capture becomes a no-op. Set the DSN to start shipping errors.
+    SENTRY_DSN: Joi.string().uri().optional(),
+    SENTRY_ENVIRONMENT: Joi.string().optional(),
+    SENTRY_TRACES_SAMPLE_RATE: Joi.number().min(0).max(1).optional(),
 }).unknown(true)

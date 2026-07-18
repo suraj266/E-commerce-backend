@@ -72,6 +72,16 @@ RUN pnpm exec prisma generate
 
 COPY --from=builder /app/dist ./dist
 
+# Run as the built-in non-root `node` user (uid 1000). Own /app so the process
+# can read its own files but not escalate.
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 7000
+
+# node:slim has no curl/wget, so the healthcheck is a Node one-liner hitting the
+# terminus /health endpoint. Marks the container healthy only once the app serves 200.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||7000)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 CMD ["node", "dist/main"]
