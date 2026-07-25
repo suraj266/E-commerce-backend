@@ -34,6 +34,9 @@ import {
 } from './dto/verify-seller.input';
 import { CreatePayoutAccountInput } from './dto/create-payout-account.input';
 import { UpdatePayoutAccountInput } from './dto/update-payout-account.input';
+import { OutboxService } from '@/modules/outbox/outbox.service';
+import { OUTBOX_EVENT, OUTBOX_QUEUE } from '@/modules/outbox/outbox.constants';
+import { NotificationService } from '@/modules/notification/notification.service';
 
 const ENTITY_BUSINESS_TYPES: BusinessType[] = [
   BusinessType.PARTNERSHIP,
@@ -49,6 +52,13 @@ export class SellerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
+    private readonly outbox: OutboxService,
+    // @Global NotificationService (P3-08). Optional trailing param so the seller
+    // spec's Test.createTestingModule auto-mocker (and any positional
+    // construction) stays valid; Nest always injects it in the running app.
+    // Writes the seller's KYC-decision bell entry alongside the email —
+    // best-effort, guarded with `?.`. See P3-08.
+    private readonly notifications?: NotificationService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -449,22 +459,26 @@ export class SellerService {
         (seller.gstin ? updated.gstinVerifiedAt : true);
 
       if (allRequiredVerified) {
-        const verified = await this.prisma.seller.update({
-          where: { id: input.id },
-          data: {
-            overallStatus: SellerStatus.VERIFIED,
-            rejectionReason: null,
-          },
-          include: { payoutAccounts: { where: { deletedAt: null } } },
-        });
-
         // We only reach here from PENDING/UNDER_REVIEW, so this is a genuine
-        // first-time transition into VERIFIED — safe to notify without resend.
-        this.notifySellerKycApproved(verified).catch((err) =>
-          this.logger.warn(
-            `seller_kyc_approved email failed: ${(err as Error).message}`,
-          ),
-        );
+        // first-time transition into VERIFIED. The approval email is enqueued as
+        // a durable OutboxEvent INSIDE the same tx as the status flip, so it
+        // can't be dropped by a crash after commit (was fire-and-forget).
+        const verified = await this.prisma.$transaction(async (tx) => {
+          const s = await tx.seller.update({
+            where: { id: input.id },
+            data: {
+              overallStatus: SellerStatus.VERIFIED,
+              rejectionReason: null,
+            },
+            include: { payoutAccounts: { where: { deletedAt: null } } },
+          });
+          await this.outbox.enqueue(tx, {
+            type: OUTBOX_EVENT.EMAIL_SELLER_KYC_APPROVED,
+            queue: OUTBOX_QUEUE.EMAILS,
+            payload: { sellerId: s.id },
+          });
+          return s;
+        });
 
         return verified;
       }
@@ -490,42 +504,49 @@ export class SellerService {
 
   async setStatus(input: SetSellerStatusInput) {
     const previous = await this.findOneOrThrow(input.id);
-    const updated = await this.prisma.seller.update({
-      where: { id: input.id },
-      data: {
-        overallStatus: input.status,
-        rejectionReason:
-          input.status === SellerStatus.REJECTED ||
-          input.status === SellerStatus.SUSPENDED
-            ? input.reason ?? null
-            : null,
-      },
-      include: { payoutAccounts: { where: { deletedAt: null } } },
-    });
 
     // Notify on genuine transitions only — the previous-status guards stop a
     // re-verify / re-reject of an already-VERIFIED/REJECTED seller from
-    // re-sending. All sends are fire-and-forget so mail never blocks the admin.
-    if (
-      input.status === SellerStatus.VERIFIED &&
-      previous.overallStatus !== SellerStatus.VERIFIED
-    ) {
-      this.notifySellerKycApproved(updated).catch((err) =>
-        this.logger.warn(
-          `seller_kyc_approved email failed: ${(err as Error).message}`,
-        ),
-      );
-    }
-    if (
-      input.status === SellerStatus.REJECTED &&
-      previous.overallStatus !== SellerStatus.REJECTED
-    ) {
-      this.notifySellerKycRejected(updated, input.reason).catch((err) =>
-        this.logger.warn(
-          `seller_kyc_rejected email failed: ${(err as Error).message}`,
-        ),
-      );
-    }
+    // re-sending. The KYC email is enqueued as a durable OutboxEvent in the SAME
+    // tx as the status flip (was fire-and-forget), so mail never blocks the
+    // admin AND can't be dropped by a post-commit crash. The rejection reason is
+    // persisted on the row, so the email worker reads it back at send time.
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const s = await tx.seller.update({
+        where: { id: input.id },
+        data: {
+          overallStatus: input.status,
+          rejectionReason:
+            input.status === SellerStatus.REJECTED ||
+            input.status === SellerStatus.SUSPENDED
+              ? input.reason ?? null
+              : null,
+        },
+        include: { payoutAccounts: { where: { deletedAt: null } } },
+      });
+
+      if (
+        input.status === SellerStatus.VERIFIED &&
+        previous.overallStatus !== SellerStatus.VERIFIED
+      ) {
+        await this.outbox.enqueue(tx, {
+          type: OUTBOX_EVENT.EMAIL_SELLER_KYC_APPROVED,
+          queue: OUTBOX_QUEUE.EMAILS,
+          payload: { sellerId: s.id },
+        });
+      }
+      if (
+        input.status === SellerStatus.REJECTED &&
+        previous.overallStatus !== SellerStatus.REJECTED
+      ) {
+        await this.outbox.enqueue(tx, {
+          type: OUTBOX_EVENT.EMAIL_SELLER_KYC_REJECTED,
+          queue: OUTBOX_QUEUE.EMAILS,
+          payload: { sellerId: s.id },
+        });
+      }
+      return s;
+    });
 
     return updated;
   }
@@ -667,29 +688,83 @@ export class SellerService {
     );
   }
 
-  /** seller_kyc_approved — sent to the seller on a first VERIFIED transition. */
-  private async notifySellerKycApproved(
-    seller: Pick<Seller, 'userId' | 'displayName' | 'legalName'>,
-  ): Promise<void> {
+  /**
+   * seller_kyc_approved — sent on a first VERIFIED transition. Invoked by the
+   * outbox email worker for an `email.seller_kyc_approved` event; re-reads the
+   * seller by id. Throws on a genuine send failure so the outbox retries; skips
+   * cleanly when SKIPPED or there's no recipient.
+   */
+  async sendKycApprovedEmail(sellerId: string): Promise<void> {
+    const seller = await this.prisma.seller.findUnique({
+      where: { id: sellerId },
+      select: { userId: true, displayName: true, legalName: true },
+    });
+    if (!seller) return;
+
+    // In-app bell entry for the seller user (before the send; idempotent).
+    await this.notifications?.create({
+      userId: seller.userId,
+      type: 'seller_kyc_approved',
+      title: 'KYC approved',
+      body: 'Your seller account has been verified. You can now start selling.',
+      data: { sellerId, link: '/seller/dashboard' },
+      dedupeKey: `notif:seller_kyc_approved:${sellerId}`,
+    });
+
     const { email, name } = await this.resolveSellerContact(seller.userId);
     if (!email) return;
-    await this.email.send('seller_kyc_approved', email, {
+    const result = await this.email.send('seller_kyc_approved', email, {
       sellerName: this.sellerDisplayName(seller, name),
       dashboardLink: `${config.FRONTEND_URL ?? ''}/seller/dashboard`,
     });
+    if (!result.sent && !result.skipped) {
+      throw new Error(`seller_kyc_approved email failed: ${result.message}`);
+    }
   }
 
-  /** seller_kyc_rejected — sent to the seller with the admin's reason. */
-  private async notifySellerKycRejected(
-    seller: Pick<Seller, 'userId' | 'displayName' | 'legalName'>,
-    reason?: string | null,
-  ): Promise<void> {
+  /**
+   * seller_kyc_rejected — sent with the admin's reason (read back from the
+   * persisted `rejectionReason`). Invoked by the outbox email worker for an
+   * `email.seller_kyc_rejected` event. Throws on a genuine send failure so the
+   * outbox retries; skips cleanly otherwise.
+   */
+  async sendKycRejectedEmail(sellerId: string): Promise<void> {
+    const seller = await this.prisma.seller.findUnique({
+      where: { id: sellerId },
+      select: {
+        userId: true,
+        displayName: true,
+        legalName: true,
+        rejectionReason: true,
+      },
+    });
+    if (!seller) return;
+
+    const reason =
+      seller.rejectionReason?.trim() || 'Please review your submitted details.';
+
+    // In-app bell entry for the seller user (before the send; idempotent). Keyed
+    // per seller so a redelivered job is a no-op; a genuine re-rejection after a
+    // resubmission reuses this key and will not raise a fresh bell entry — the
+    // updated reason is surfaced via the email + dashboard.
+    await this.notifications?.create({
+      userId: seller.userId,
+      type: 'seller_kyc_rejected',
+      title: 'KYC rejected',
+      body: `Your seller verification was not approved: ${reason}`,
+      data: { sellerId, reason, link: '/seller/dashboard' },
+      dedupeKey: `notif:seller_kyc_rejected:${sellerId}`,
+    });
+
     const { email, name } = await this.resolveSellerContact(seller.userId);
     if (!email) return;
-    await this.email.send('seller_kyc_rejected', email, {
+    const result = await this.email.send('seller_kyc_rejected', email, {
       sellerName: this.sellerDisplayName(seller, name),
-      rejectionReason: reason?.trim() || 'Please review your submitted details.',
+      rejectionReason: reason,
     });
+    if (!result.sent && !result.skipped) {
+      throw new Error(`seller_kyc_rejected email failed: ${result.message}`);
+    }
   }
 
   /**

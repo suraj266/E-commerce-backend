@@ -98,17 +98,9 @@ model UserAddress {
   @@index([userId])
 }
 
-model ApiKey {
-  id          String @id @default(uuid())
-  userId      String
-  name        String
-  keyHash     String @unique
-  keyPrefix   String
-  permissions Json   @default("[]")
-  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
+// NOTE: the full ApiKey model lives in apikey.prisma (P3 Wave-4). The
+// `User.apiKeys ApiKey[]` back-relation stays above; its `owner` side is defined
+// there.
 
 model Session {
   id        String   @id @default(uuid())

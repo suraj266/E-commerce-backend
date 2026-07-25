@@ -17,7 +17,7 @@ export class CollectionResolver {
   // Public
   // ---------------------------------------------------------------------------
 
-  /** Active collections — homepage / nav. */
+  /** Active collections — homepage / nav. Public. */
   @Query(() => [Collection], { name: 'collections' })
   publicCollections(
     @Args('featuredOnly', { type: () => Boolean, nullable: true })
@@ -26,6 +26,7 @@ export class CollectionResolver {
     return this.collections.findAll('ACTIVE', featuredOnly ?? false);
   }
 
+  /** Storefront collection by slug; ACTIVE only. Public. */
   @Query(() => Collection, { name: 'publicCollection' })
   publicCollection(@Args('slug', { type: () => String }) slug: string) {
     return this.collections.findPublic(slug);
@@ -36,6 +37,7 @@ export class CollectionResolver {
   // ---------------------------------------------------------------------------
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin collection list, any status. Auth: collection:read. */
   @Permissions('collection:read')
   @Query(() => [Collection], { name: 'adminCollections' })
   adminCollections(
@@ -46,6 +48,7 @@ export class CollectionResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin fetches one collection by id. Auth: collection:read. */
   @Permissions('collection:read')
   @Query(() => Collection, { name: 'collection' })
   collection(@Args('id', { type: () => ID }) id: string) {
@@ -53,6 +56,7 @@ export class CollectionResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Creates a MANUAL (product junction) or SMART (rule-based) collection. Auth: collection:create. */
   @Permissions('collection:create')
   @Mutation(() => Collection)
   createCollection(@Args('createCollectionInput') input: CreateCollectionInput) {
@@ -60,6 +64,7 @@ export class CollectionResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Edits a collection; switching to SMART clears manual membership. Auth: collection:update. */
   @Permissions('collection:update')
   @Mutation(() => Collection)
   updateCollection(@Args('updateCollectionInput') input: UpdateCollectionInput) {
@@ -67,6 +72,7 @@ export class CollectionResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Soft-deletes a collection. Auth: collection:delete. */
   @Permissions('collection:delete')
   @Mutation(() => Collection)
   removeCollection(@Args('id', { type: () => ID }) id: string) {

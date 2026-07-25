@@ -20,7 +20,7 @@ export class TagResolver {
 
   /**
    * Public list — sellers' product create form populates the tag picker
-   * from this query. Returns ACTIVE tags by default.
+   * from this query. Returns ACTIVE tags by default. Public.
    */
   @Query(() => [Tag], { name: 'tags' })
   tags(
@@ -32,6 +32,7 @@ export class TagResolver {
     return this.tagService.findAll(status ?? TagStatus.ACTIVE, featuredOnly ?? false);
   }
 
+  /** Storefront tag landing by slug; ACTIVE only. Public. */
   @Query(() => Tag, { name: 'publicTag' })
   publicTag(@Args('slug', { type: () => String }) slug: string) {
     return this.tagService.findPublic(slug);
@@ -42,6 +43,7 @@ export class TagResolver {
   // ---------------------------------------------------------------------------
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin tag list, any status. Auth: tag:read. */
   @Permissions('tag:read')
   @Query(() => [Tag], { name: 'adminTags' })
   adminTags(
@@ -52,6 +54,7 @@ export class TagResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin fetches one tag by id. Auth: tag:read. */
   @Permissions('tag:read')
   @Query(() => Tag, { name: 'tag' })
   findOne(@Args('id', { type: () => ID }) id: string) {
@@ -59,6 +62,7 @@ export class TagResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Creates a tag; names are globally unique (case-insensitive). Auth: tag:create. */
   @Permissions('tag:create')
   @Mutation(() => Tag)
   createTag(@Args('createTagInput') input: CreateTagInput) {
@@ -66,6 +70,7 @@ export class TagResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Edits a tag; re-checks name uniqueness on rename. Auth: tag:update. */
   @Permissions('tag:update')
   @Mutation(() => Tag)
   updateTag(@Args('updateTagInput') input: UpdateTagInput) {
@@ -73,6 +78,7 @@ export class TagResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Toggles a tag's status and/or featured flag. Auth: tag:update + tag:feature. */
   @Permissions('tag:update', 'tag:feature')
   @Mutation(() => Tag)
   setTagStatus(@Args('setTagStatusInput') input: SetTagStatusInput) {
@@ -80,6 +86,7 @@ export class TagResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Soft-deletes a tag. Auth: tag:delete. */
   @Permissions('tag:delete')
   @Mutation(() => Tag)
   removeTag(@Args('id', { type: () => ID }) id: string) {

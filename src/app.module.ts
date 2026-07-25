@@ -12,9 +12,10 @@ import { envSchema } from "@/common/config/env.validation";
 import { RoleModule } from './modules/identity/role/role.module';
 import { CustomerModule } from './modules/identity/customer/customer.module';
 import { AddressModule } from './modules/identity/address/address.module';
+import { ApiKeyModule } from './modules/identity/apikey/apikey.module';
 import { ThrottlerModule } from "@nestjs/throttler";
 import { ScheduleModule } from "@nestjs/schedule";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { GqlThrottlerGuard } from "./libs/gqlThtottlerGuard.module";
 import { HealthModule } from "./modules/health/health.module";
 // Ecommerce modules
@@ -40,6 +41,7 @@ import { LabelModule } from './modules/ecommerce/label/label.module';
 import { CollectionModule } from './modules/ecommerce/collection/collection.module';
 import { ShippingModule } from './modules/ecommerce/shipping/shipping.module';
 import { CourierModule } from './modules/ecommerce/courier/courier.module';
+import { ReturnsModule } from './modules/ecommerce/returns/returns.module';
 // CMS modules
 import { PageModule } from './modules/cms/page/page.module';
 import { MenuModule } from './modules/cms/menu/menu.module';
@@ -52,6 +54,17 @@ import { AdminThemeModule } from './modules/admin/admin-theme/admin-theme.module
 import { SiteSettingModule } from './modules/admin/site-setting/site-setting.module';
 import { EmailModule } from './modules/admin/email/email.module';
 import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
+// Infra modules
+import { OutboxModule } from './modules/outbox/outbox.module';
+// Observability modules
+import { AuditModule } from './modules/observability/audit/audit.module';
+import { AuditInterceptor } from './modules/observability/audit/audit.interceptor';
+import { NotificationModule } from './modules/notification/notification.module';
+import { MetricsModule } from './modules/observability/metrics/metrics.module';
+import { HttpMetricsInterceptor } from './modules/observability/metrics/http-metrics.interceptor';
+// Compliance modules
+import { PrivacyModule } from './modules/compliance/privacy/privacy.module';
+import { TcsModule } from './modules/compliance/tcs/tcs.module';
 
 
 @Module({
@@ -77,6 +90,10 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
     RoleModule,
     CustomerModule,
     AddressModule,
+    // Programmatic API keys for sellers/admins (Phase 3, Wave 4). Mint (returns
+    // the plaintext once) / list / revoke / verify; ApiKeyGuard authenticates an
+    // inbound `Authorization: Bearer sk_...` for future M2M surfaces.
+    ApiKeyModule,
     HealthModule,
     // ---- Ecommerce Modules ----
     CategoryModule,
@@ -101,6 +118,9 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
     CollectionModule,
     ShippingModule,
     CourierModule,
+    // Returns / RMA lifecycle (P3-02): reverse-pickup + reuse of the guarded
+    // refund + carry-forward payout clawback + §52 TCS reversal.
+    ReturnsModule,
     // ---- CMS Modules ----
     PageModule,
     MenuModule,
@@ -113,9 +133,46 @@ import { DashboardModule } from './modules/admin/dashboard/dashboard.module';
     SiteSettingModule,
     EmailModule,
     DashboardModule,
+    // ---- Infra Modules ----
+    // In-app notification bell (P3-08). @Global, so the outbox worker handlers +
+    // the domain services that own the lifecycle-email senders inject
+    // NotificationService to write a bell entry alongside each email without
+    // extra module wiring. Registered before OutboxModule so it is in the graph
+    // when the worker handlers resolve it.
+    NotificationModule,
+    // Durable transactional outbox (P3-01). Registered last; it imports the
+    // domain modules whose services its workers call. OutboxCoreModule
+    // (OutboxService, @Global) is pulled in transitively for the enqueuers.
+    OutboxModule,
+    // ---- Observability Modules ----
+    // Append-only security audit log (P3-05). @Global, so the money-mover
+    // services inject AuditService without extra module wiring.
+    AuditModule,
+    // Prometheus metrics (P3-04). @Global (exposes MetricsService for future
+    // domain increments) + mounts the secured GET /metrics endpoint and the
+    // default Node/runtime metrics. The HTTP-duration interceptor is registered
+    // as an APP_INTERCEPTOR below; the Prisma query-timing extension is composed
+    // inside PrismaService.
+    MetricsModule,
+    // ---- Compliance Modules ----
+    // DPDP Act 2023 (P3-07): erasure-as-anonymization, data export, consent.
+    PrivacyModule,
+    // TCS §52 marketplace tax (P3-03). @Global, so the money-mover services
+    // (payment/refund/payout/seller-order) inject TcsService without importing
+    // it. Accrual/reversal/netting; GSTR-8/GSTR-1 export. NEEDS CA SIGN-OFF.
+    TcsModule,
   ],
   controllers: [AppController],
-  providers: [AppService, SentryShutdownService, { provide: APP_GUARD, useClass: GqlThrottlerGuard }],
+  providers: [
+    AppService,
+    SentryShutdownService,
+    { provide: APP_GUARD, useClass: GqlThrottlerGuard },
+    // Global audit interceptor (P3-05) — inert unless a handler carries @Audit.
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    // Global HTTP-duration interceptor (P3-04) — observes
+    // http_request_duration_seconds once per request (dedupes GraphQL fan-out).
+    { provide: APP_INTERCEPTOR, useClass: HttpMetricsInterceptor },
+  ],
 })
 export class AppModule implements NestModule {
   // Registered here (in the root module) so it binds AFTER nestjs-pino's own

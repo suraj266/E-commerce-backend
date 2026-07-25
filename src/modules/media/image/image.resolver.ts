@@ -12,6 +12,7 @@ import type { CurrentUserPayload } from '@/common/decorators/current-user.decora
 export class ImageResolver {
   constructor(private readonly service: ImageService) {}
 
+  /** Issues a presigned upload target for a new image (caller recorded as uploader). Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => PresignUploadPayload)
   async presignImageUpload(
@@ -29,6 +30,7 @@ export class ImageResolver {
     };
   }
 
+  /** Persists the Image row once bytes have arrived; probes real dimensions/format via Sharp. Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Image)
   confirmImageUpload(
@@ -38,6 +40,7 @@ export class ImageResolver {
     return this.service.confirmUpload(input, user.userId);
   }
 
+  /** Soft-deletes an image; only its uploader or a platform admin may delete it (IDOR-guarded). Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Image)
   deleteImage(
@@ -47,6 +50,7 @@ export class ImageResolver {
     return this.service.deleteImage(id, user.userId);
   }
 
+  /** Fetches one non-deleted image by id. Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Image, { name: 'image', nullable: true })
   findOne(@Args('id', { type: () => ID }) id: string) {

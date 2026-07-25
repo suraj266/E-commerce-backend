@@ -25,6 +25,7 @@ export class ReviewResolver {
   // Public
   // ---------------------------------------------------------------------------
 
+  /** Published reviews for a product page, paginated + rating-filtered/sorted. Public. */
   @Query(() => PaginatedReviews, { name: 'publicProductReviews' })
   publicList(
     @Args('productId', { type: () => ID }) productId: string,
@@ -37,6 +38,7 @@ export class ReviewResolver {
     return this.service.publicList({ productId, page, pageSize, rating, sort });
   }
 
+  /** Aggregate rating average + per-star counts for a product's PDP header. Public. */
   @Query(() => ProductRatingSummary, { name: 'productRatingSummary' })
   summary(@Args('productId', { type: () => ID }) productId: string) {
     return this.service.summary(productId);
@@ -46,6 +48,7 @@ export class ReviewResolver {
   // Customer-authenticated
   // ---------------------------------------------------------------------------
 
+  /** The caller's own review for a product, if any. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Review, { name: 'myReview', nullable: true })
   myReview(
@@ -55,6 +58,7 @@ export class ReviewResolver {
     return this.service.myReview(user.userId, productId);
   }
 
+  /** Whether the caller may review a product (needs a delivered order + no existing review). Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Query(() => ReviewEligibility, { name: 'reviewEligibility' })
   eligibility(
@@ -64,6 +68,7 @@ export class ReviewResolver {
     return this.service.eligibility(user.userId, productId);
   }
 
+  /** Customer writes a review (delivered-order gated); starts PENDING until admin moderation. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Review)
   createReview(
@@ -73,6 +78,7 @@ export class ReviewResolver {
     return this.service.create(user.userId, input);
   }
 
+  /** Customer edits their own review; a published one re-enters PENDING moderation. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Review)
   updateReview(
@@ -82,6 +88,7 @@ export class ReviewResolver {
     return this.service.update(user.userId, input);
   }
 
+  /** Customer soft-deletes their own review (kept for reproducible rating history). Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Review, { nullable: true })
   async deleteReview(

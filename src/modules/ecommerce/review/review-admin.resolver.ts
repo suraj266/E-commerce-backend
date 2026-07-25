@@ -21,6 +21,7 @@ import {
 export class ReviewAdminResolver {
   constructor(private readonly service: ReviewService) {}
 
+  /** Moderation list (defaults to PENDING queue), searchable by title/body. Auth: review:read permission. */
   @Permissions('review:read')
   @Query(() => PaginatedAdminReviews, { name: 'adminReviews' })
   list(
@@ -34,6 +35,7 @@ export class ReviewAdminResolver {
     return this.service.adminList({ status, search, page, pageSize });
   }
 
+  /** Publish a review and email the customer it's live. Auth: review:moderate permission. */
   @Permissions('review:moderate')
   @Mutation(() => AdminReview)
   approveReview(
@@ -43,6 +45,7 @@ export class ReviewAdminResolver {
     return this.service.approve(user.userId, id);
   }
 
+  /** Hide a review with a reason (captured in audit fields) and email the customer. Auth: review:moderate permission. */
   @Permissions('review:moderate')
   @Mutation(() => AdminReview)
   rejectReview(

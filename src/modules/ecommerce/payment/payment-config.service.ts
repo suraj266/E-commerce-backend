@@ -21,6 +21,7 @@ import { ConfigService } from '@nestjs/config';
 import { PaymentGateway } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { CryptoService } from '@/common/crypto/crypto.service';
+import { AuditService } from '@/modules/observability/audit/audit.service';
 import {
   CreateGatewayConfigInput,
   UpdateGatewayConfigInput,
@@ -32,6 +33,9 @@ export class PaymentConfigService {
     private readonly prisma: PrismaService,
     private readonly crypto: CryptoService,
     private readonly config: ConfigService,
+    // Optional so any direct instantiation in tests keeps compiling; the app
+    // always injects it (AuditModule is @Global). Best-effort. See P3-05.
+    private readonly audit?: AuditService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -111,6 +115,16 @@ export class PaymentConfigService {
         webhookUrl,
       },
     });
+
+    // Best-effort audit — credentials NEVER appear in the snapshot (redacted).
+    await this.audit?.record({
+      action: 'payment_config.create',
+      entityType: 'PaymentGatewayConfig',
+      entityId: row.id,
+      before: null,
+      after: this.auditSnapshot(row),
+    });
+
     return this.toSafeShape(row);
   }
 
@@ -155,6 +169,17 @@ export class PaymentConfigService {
       where: { id: input.id },
       data,
     });
+
+    // Best-effort audit of the config edit — credentials REDACTED in both
+    // snapshots (the encrypted blob is never emitted, only presence).
+    await this.audit?.record({
+      action: 'payment_config.update',
+      entityType: 'PaymentGatewayConfig',
+      entityId: row.id,
+      before: this.auditSnapshot(existing),
+      after: this.auditSnapshot(row),
+    });
+
     return this.toSafeShape(row);
   }
 
@@ -233,6 +258,38 @@ export class PaymentConfigService {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Build a REDACTED snapshot of a gateway-config row for the audit trail. The
+   * encrypted `credentials` blob (and, by extension, any secret it holds) is
+   * NEVER emitted — it is replaced with "***" when present, or null when
+   * absent. See P3-05.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private auditSnapshot(row: any) {
+    return {
+      id: row.id,
+      gateway: row.gateway,
+      displayName: row.displayName,
+      description: row.description,
+      logoUrl: row.logoUrl,
+      isEnabled: row.isEnabled,
+      isDefault: row.isDefault,
+      displayOrder: row.displayOrder,
+      supportedMethods: Array.isArray(row.supportedMethods)
+        ? row.supportedMethods
+        : [],
+      sandboxMode: row.sandboxMode,
+      processingFee: row.processingFee != null ? Number(row.processingFee) : null,
+      processingFeeType: row.processingFeeType,
+      paymentType: row.paymentType,
+      instructions: row.instructions,
+      webhookUrl: row.webhookUrl,
+      // Credentials are secret — never store the (encrypted) value; record only
+      // that they are set, with the redaction token.
+      credentials: row.credentials ? '***' : null,
+    };
+  }
 
   /**
    * Convert a DB row to a safe shape — credentials are masked, never exposed.

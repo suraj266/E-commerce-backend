@@ -23,11 +23,13 @@ import {
   VerifyEmailDto,
 } from './dto/verify-email.dto';
 import { LoginResponse } from './entities/login.entity';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { verify, hash } from 'argon2';
 import { JwtService } from '@nestjs/jwt';
 import { config } from '@/common/config/config';
 import { EmailService } from '@/modules/admin/email/email.service';
+import { CartService } from '@/modules/ecommerce/cart/cart.service';
 
 const VERIFICATION_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const MAX_FAILED_LOGIN_ATTEMPTS = 5; // lock after this many consecutive failures
@@ -46,6 +48,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly email: EmailService,
+    private readonly cartService: CartService,
   ) {}
 
   // Common context applied to every email — domain-derived `shopName` could
@@ -368,6 +371,24 @@ export class AuthService {
       },
     });
 
+    // Best-effort guest-cart merge. The login controller injects the
+    // guestCartToken from the httpOnly cookie. This is intentionally
+    // soft-fail — a merge error must NEVER block a successful sign-in.
+    if (loginUserInput.guestCartToken) {
+      try {
+        await this.cartService.mergeGuestIntoCustomer(
+          id,
+          loginUserInput.guestCartToken,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Guest cart merge on login failed for user ${id}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     return {
       accessToken,
       refreshToken,
@@ -496,6 +517,35 @@ export class AuthService {
     }
 
     throw new UnauthorizedException('Invalid refresh token');
+  }
+
+  // ========================
+  // SESSION REVOCATION (DPDP erasure — P3-07)
+  // ========================
+  /**
+   * Revoke EVERY session + refresh token for a user — signs them out of all
+   * devices. Called by PrivacyService.anonymizeUser during erasure to sever
+   * access before the account is anonymized (also usable for a security
+   * "log out everywhere" action).
+   *
+   * Idempotent: `deleteMany` over already-absent rows is a harmless no-op, so
+   * it is safe for the erasure retry path to call this more than once. This is
+   * an additive method — it does NOT touch the Wave-1 guest-cart-merge logic in
+   * `login`.
+   */
+  async revokeAllSessions(
+    userId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<{ sessions: number; refreshTokens: number }> {
+    // Runs on the caller's tx when provided (so DPDP erasure revokes atomically
+    // with the PII scrub); else self-contained. Idempotent deleteMany.
+    const db = tx ?? this.prisma;
+    const sessions = await db.session.deleteMany({ where: { userId } });
+    const refreshTokens = await db.refreshToken.deleteMany({ where: { userId } });
+    this.logger.log(
+      `Revoked ${sessions.count} session(s) + ${refreshTokens.count} refresh token(s) for user ${userId}.`,
+    );
+    return { sessions: sessions.count, refreshTokens: refreshTokens.count };
   }
 
   // ========================

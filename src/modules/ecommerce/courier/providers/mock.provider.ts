@@ -12,6 +12,7 @@ import {
   AwbResult,
   CourierContext,
   CourierLoginResult,
+  CreateReturnShipmentRequest,
   CreateShipmentRequest,
   ICourierProvider,
   LabelResult,
@@ -72,6 +73,16 @@ export class MockProvider implements ICourierProvider {
     return {
       providerOrderId: `MOCK-ORD-${req.orderNumber}`,
       providerShipmentId: `MOCK-SHP-${req.orderNumber}`,
+    };
+  }
+
+  async createReturnShipment(
+    _ctx: CourierContext,
+    req: CreateReturnShipmentRequest,
+  ): Promise<ShipmentResult> {
+    return {
+      providerOrderId: `MOCK-RET-${req.returnNumber}`,
+      providerShipmentId: `MOCK-RSHP-${req.returnNumber}`,
     };
   }
 

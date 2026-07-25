@@ -39,6 +39,15 @@ const defaults = [
       'Rendered height of the logo (in pixels) across the storefront header, admin panel, and admin login. Width scales automatically to preserve aspect ratio. Typical range: 24–64.',
     valueType: 'NUMBER' as const,
   },
+  {
+    key: 'ops_alert_email',
+    value: '',
+    group: 'EMAIL' as const,
+    label: 'Ops Alert Email',
+    description:
+      'Operations inbox that receives courier NDR/RTO exception alerts alongside the seller (Phase 3 P3-11). Leave empty to alert only the seller — no placeholder is ever emailed.',
+    valueType: 'STRING' as const,
+  },
 ];
 
 async function main() {

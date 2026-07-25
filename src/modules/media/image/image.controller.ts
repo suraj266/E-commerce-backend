@@ -46,6 +46,7 @@ export class ImageController {
     private readonly local: LocalProvider,
   ) {}
 
+  /** POST /media/upload — receive multipart image bytes (magic-byte validated) and write the master to disk. Auth: logged-in user. */
   @Post('upload')
   @HttpCode(200)
   @UseGuards(JwtAuthGuard)

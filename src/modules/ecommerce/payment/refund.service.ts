@@ -50,6 +50,12 @@ import {
   type IPaymentGateway,
 } from './gateways/payment-gateway.interface';
 import { RequestRefundInput } from './dto/request-refund.input';
+import { OutboxService } from '@/modules/outbox/outbox.service';
+import { OUTBOX_EVENT, OUTBOX_QUEUE } from '@/modules/outbox/outbox.constants';
+import { AuditService } from '@/modules/observability/audit/audit.service';
+import { TcsService } from '@/modules/compliance/tcs/tcs.service';
+import { NotificationService } from '@/modules/notification/notification.service';
+import { MetricsService } from '@/modules/observability/metrics/metrics.service';
 
 /** Rounds to 2dp — money is Decimal(10,2); we compare in major units. */
 function round2(n: number): number {
@@ -82,6 +88,24 @@ export class RefundService {
     @Inject(PAYMENT_GATEWAY_MAP)
     private readonly gatewayMap: Map<string, IPaymentGateway>,
     private readonly email: EmailService,
+    private readonly outbox: OutboxService,
+    // Optional so existing unit tests that construct RefundService directly keep
+    // compiling; the app always injects it (AuditModule is @Global). Audit
+    // writes are best-effort — `record()` never throws — so a missing instance
+    // (in a test) simply skips the trail. See P3-05.
+    private readonly audit?: AuditService,
+    // Optional trailing param (same reasoning; TcsModule is @Global). On a
+    // finalized refund we write a NEGATIVE §52 TCS reversal row INSIDE the
+    // finalize transaction — guarded with `?.`. See P3-03.
+    private readonly tcs?: TcsService,
+    // @Global NotificationService (P3-08). Optional trailing param (same
+    // reasoning). Writes the buyer's in-app "refunded" bell entry alongside the
+    // refund email — best-effort, guarded with `?.`. See P3-08.
+    private readonly notifications?: NotificationService,
+    // @Global MetricsService (P3-04). Optional trailing param (same reasoning).
+    // Fire-and-forget business counter — a metrics hiccup can never fail a
+    // refund. recordRefundProcessed('processed'|'failed') at the terminal points.
+    private readonly metrics?: MetricsService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -156,6 +180,117 @@ export class RefundService {
   }
 
   // ---------------------------------------------------------------------------
+  // Returns / RMA reuse (P3-02)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run the buyer refund for a QC-passed return against ONE seller-order slice.
+   * The single reuse point for the returns flow — it does NOT re-implement the
+   * money path: it creates a restock-enabled Refund and drives the existing
+   * guarded, exactly-once `approveRefund` (which finalizes Payment/Order status,
+   * gated restock, and the §52 TCS reversal). The payout-in-flight hard block is
+   * skipped because returns recover an already-settled order via a
+   * PayoutAdjustment clawback, not by refusing the refund.
+   *
+   * Prepaid → refunds immediately through the gateway. COD (or no gateway
+   * payment id) → leaves the Refund REQUESTED for finance to disburse manually
+   * (restock then runs when finance approves it).
+   */
+  async refundForReturn(input: {
+    orderId: string;
+    sellerOrderId: string;
+    amount: number;
+    reason?: string;
+    requestedById?: string | null;
+    approvedById?: string | null;
+    /**
+     * The originating ReturnRequest. The refund row is created AND linked back
+     * onto ReturnRequest.refundId in ONE transaction, so this method is
+     * idempotent per return: a resume (reconciliation cron re-driving a return
+     * whose completion crashed) reuses the already-linked refund instead of
+     * creating a second one — no double refund.
+     */
+    returnRequestId: string;
+  }) {
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        orderId: input.orderId,
+        status: PaymentTransactionStatus.CAPTURED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!payment) {
+      throw new BadRequestException(
+        'No captured payment exists for this order to refund.',
+      );
+    }
+
+    // Reuse the refund already reserved for this return, if any (idempotent
+    // resume). Only create — and clamp against the refundable ceiling — the
+    // FIRST time, when no refund is linked yet.
+    const rr = await this.prisma.returnRequest.findUnique({
+      where: { id: input.returnRequestId },
+      select: { refundId: true },
+    });
+    let refundId = rr?.refundId ?? null;
+
+    if (!refundId) {
+      const maxRefundable = await this.computeMaxRefundable(
+        payment.id,
+        Number(payment.amount),
+      );
+      const amount = round2(Math.min(input.amount, maxRefundable));
+      if (amount <= 0) {
+        throw new BadRequestException('This payment is already fully refunded.');
+      }
+      // Create + link atomically BEFORE any gateway movement: if execution
+      // crashes, the link survives and the resume reuses this same refund.
+      const created = await this.prisma.$transaction(async (tx) => {
+        const r = await tx.refund.create({
+          data: {
+            orderId: input.orderId,
+            sellerOrderId: input.sellerOrderId,
+            paymentId: payment.id,
+            amount: new Prisma.Decimal(amount),
+            reason: input.reason ?? 'Return / RMA',
+            restock: true, // returned stock always comes back in
+            status: RefundStatus.REQUESTED,
+            requestedById: input.requestedById ?? null,
+          },
+        });
+        await tx.returnRequest.update({
+          where: { id: input.returnRequestId },
+          data: { refundId: r.id },
+        });
+        return r;
+      });
+      refundId = created.id;
+    }
+
+    const refund = await this.prisma.refund.findUnique({
+      where: { id: refundId },
+    });
+    if (!refund) {
+      throw new NotFoundException('Reserved return refund missing.');
+    }
+
+    // COD / no gateway payment id → manual disbursement; leave it REQUESTED.
+    if (payment.gateway === PaymentGateway.COD || !payment.gatewayPaymentId) {
+      return refund;
+    }
+
+    // Prepaid → guarded exactly-once gateway refund + restock + TCS reversal.
+    // approveRefund is itself idempotent (an already-PROCESSED refund is returned
+    // untouched), so re-driving a reused refund never double-charges the gateway.
+    const finalized = await this.approveRefund(
+      input.approvedById ?? input.requestedById ?? 'system',
+      refund.id,
+      { skipPayoutInFlightGuard: true },
+    );
+    return finalized ?? refund;
+  }
+
+  // ---------------------------------------------------------------------------
   // Admin — money movers
   // ---------------------------------------------------------------------------
 
@@ -164,13 +299,18 @@ export class RefundService {
    * then finalizes (Payment/Order/SellerOrder/restock) in one transaction.
    * Idempotent: an already-PROCESSED refund is returned untouched.
    */
-  async approveRefund(adminUserId: string, refundId: string) {
+  async approveRefund(
+    adminUserId: string,
+    refundId: string,
+    opts?: { skipPayoutInFlightGuard?: boolean },
+  ) {
     const refund = await this.prisma.refund.findUnique({
       where: { id: refundId },
       include: { payment: true },
     });
     if (!refund) throw new NotFoundException('Refund not found.');
 
+    const priorStatus = refund.status; // captured for the audit before/after
     if (refund.status === RefundStatus.PROCESSED) return refund; // idempotent
     if (
       refund.status !== RefundStatus.REQUESTED &&
@@ -201,12 +341,15 @@ export class RefundService {
       );
     }
 
-    // Payout coupling guard.
+    // Payout coupling guard. A return-driven refund (P3-02) passes
+    // skipPayoutInFlightGuard: an already-settled seller order is NOT blocked —
+    // the money is recovered via a PayoutAdjustment clawback instead of the
+    // Phase-2 hard block.
     const scoped = await this.scopedSellerOrders(
       refund.orderId,
       refund.sellerOrderId,
     );
-    this.assertNoPayoutInFlight(scoped);
+    if (!opts?.skipPayoutInFlightGuard) this.assertNoPayoutInFlight(scoped);
 
     // Persist PROCESSING BEFORE the gateway call so a crash mid-flight is
     // recoverable (the webhook / a retry can still finalize it).
@@ -243,6 +386,7 @@ export class RefundService {
       this.logger.error(
         `Gateway refund failed for refund ${refund.id} (order ${refund.orderId}): ${(err as Error).message}`,
       );
+      this.metrics?.recordRefundProcessed('failed');
       throw new BadRequestException(
         `Gateway refund failed: ${(err as Error).message}`,
       );
@@ -266,7 +410,25 @@ export class RefundService {
       });
     }
 
-    return this.prisma.refund.findUnique({ where: { id: refund.id } });
+    const finalRefund = await this.prisma.refund.findUnique({
+      where: { id: refund.id },
+    });
+
+    // Best-effort audit of the approve action, OUTSIDE the money assertions —
+    // record() never throws (P3-05).
+    await this.audit?.record({
+      action: 'refund.approve',
+      entityType: 'Refund',
+      entityId: refund.id,
+      actorUserId: adminUserId,
+      before: { status: priorStatus, amount: Number(refund.amount) },
+      after: {
+        status: finalRefund?.status ?? RefundStatus.PROCESSING,
+        gatewayRefundId: result.refundId,
+      },
+    });
+
+    return finalRefund;
   }
 
   /** Decline a still-REQUESTED refund. */
@@ -280,7 +442,7 @@ export class RefundService {
         `Only a REQUESTED refund can be rejected (current: ${refund.status}).`,
       );
     }
-    return this.prisma.refund.update({
+    const updated = await this.prisma.refund.update({
       where: { id: refundId },
       data: {
         status: RefundStatus.REJECTED,
@@ -288,6 +450,127 @@ export class RefundService {
         failureReason: reason ?? null,
       },
     });
+
+    // Best-effort audit — outside the state change, never throws (P3-05).
+    await this.audit?.record({
+      action: 'refund.reject',
+      entityType: 'Refund',
+      entityId: refundId,
+      actorUserId: adminUserId,
+      before: { status: RefundStatus.REQUESTED },
+      after: { status: RefundStatus.REJECTED, reason: reason ?? null },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Finalize a manual (COD / no-gateway) refund that finance has disbursed by
+   * hand — the money loop a COD RETURN refund was missing. There is no gateway
+   * to call: finance transfers the money out-of-band, then records the UTR/bank
+   * reference here. Runs the SAME guarded finalize side effects the prepaid path
+   * runs — quantity-aware return-restock, §52 TCS reversal, Payment/Order status,
+   * and the durable buyer refund email/bell — via finalizeRefund.
+   *
+   * Idempotent: an already-PROCESSED refund is returned untouched, and the
+   * PROCESSED flip inside finalizeRefund is a conditional winner-elect so a
+   * re-run applies the side effects (restock/TCS/email) exactly once.
+   *
+   * Gateway-backed refunds are rejected here — they must go through approveRefund
+   * so the gateway actually moves the money.
+   */
+  async disburseManualRefund(
+    adminUserId: string,
+    refundId: string,
+    reference: string,
+    note?: string,
+  ) {
+    const trimmedRef = (reference ?? '').trim();
+    if (!trimmedRef) {
+      throw new BadRequestException(
+        'A payment reference (UTR / transaction id) is required to record a manual disbursement.',
+      );
+    }
+
+    const refund = await this.prisma.refund.findUnique({
+      where: { id: refundId },
+      include: { payment: true },
+    });
+    if (!refund) throw new NotFoundException('Refund not found.');
+
+    const priorStatus = refund.status;
+    if (refund.status === RefundStatus.PROCESSED) return refund; // idempotent
+    if (
+      refund.status !== RefundStatus.REQUESTED &&
+      refund.status !== RefundStatus.PROCESSING
+    ) {
+      throw new BadRequestException(
+        `Refund cannot be disbursed from status ${refund.status}.`,
+      );
+    }
+
+    // Manual disbursement is ONLY for COD / no-gateway refunds. A gateway-backed
+    // refund must move real money through approveRefund, not be marked paid here.
+    const payment = refund.payment;
+    const isManual =
+      payment.gateway === PaymentGateway.COD || !payment.gatewayPaymentId;
+    if (!isManual) {
+      throw new BadRequestException(
+        'This refund is gateway-backed — approve it through the gateway instead of recording a manual disbursement.',
+      );
+    }
+
+    // Re-assert the over-refund ceiling (defends against two manual disbursements
+    // each recorded in turn against the same captured payment).
+    const otherRefunded = await this.sumRefunds(
+      payment.id,
+      [RefundStatus.PROCESSING, RefundStatus.PROCESSED],
+      refund.id,
+    );
+    if (otherRefunded + Number(refund.amount) > Number(payment.amount) + EPSILON) {
+      throw new BadRequestException(
+        'Recording this disbursement would exceed the captured payment amount.',
+      );
+    }
+
+    // Preserve the manual reference on the refund BEFORE finalize so it survives
+    // even if the finalize transaction is retried. The manual marker lets the
+    // admin surface distinguish a hand-paid COD refund from a gateway one.
+    const manualResponse = {
+      manual: true,
+      reference: trimmedRef,
+      note: note ?? null,
+      disbursedById: adminUserId,
+      disbursedAt: new Date().toISOString(),
+    } as unknown as Prisma.InputJsonValue;
+
+    await this.prisma.refund.update({
+      where: { id: refund.id },
+      data: { approvedById: adminUserId, gatewayResponse: manualResponse },
+    });
+
+    // Same guarded finalize as the prepaid path: PROCESSED flip (winner-elect) +
+    // Payment/Order status + gated return-aware restock + §52 TCS reversal +
+    // durable buyer refund email. recordRefundProcessed fires inside on success.
+    await this.finalizeRefund(refund.id, { gatewayResponse: manualResponse });
+
+    const finalRefund = await this.prisma.refund.findUnique({
+      where: { id: refund.id },
+    });
+
+    await this.audit?.record({
+      action: 'refund.disburse_manual',
+      entityType: 'Refund',
+      entityId: refund.id,
+      actorUserId: adminUserId,
+      before: { status: priorStatus, amount: Number(refund.amount) },
+      after: {
+        status: finalRefund?.status ?? RefundStatus.PROCESSED,
+        reference: trimmedRef,
+      },
+    });
+
+    return finalRefund;
   }
 
   // ---------------------------------------------------------------------------
@@ -340,6 +623,7 @@ export class RefundService {
           gatewayResponse: entity as unknown as Prisma.InputJsonValue,
         },
       });
+      this.metrics?.recordRefundProcessed('failed');
       this.logger.error(
         `Refund ${refund.id} (order ${refund.orderId}) failed at gateway.`,
       );
@@ -488,25 +772,100 @@ export class RefundService {
       if (refund.restock) {
         await this.restock(tx, refund.id, refund.orderId, refund.approvedById, scoped);
       }
+
+      // Durable outbox: the customer refund email is enqueued INSIDE this tx so
+      // it commits atomically with the PROCESSED flip — it can no longer be
+      // dropped by a crash after the money moved. The email worker re-reads the
+      // refund by id and sends. Only reached when we won the flip (didFinalize).
+      await this.outbox.enqueue(tx, {
+        type: OUTBOX_EVENT.EMAIL_ORDER_REFUNDED,
+        queue: OUTBOX_QUEUE.EMAILS,
+        payload: { refundId: refund.id },
+        dedupeKey: `email:order_refunded:${refund.id}`,
+      });
+
+      // §52 TCS reversal (P3-03): write a NEGATIVE reversal row per affected
+      // seller order, proportional to the refunded share, INSIDE this finalize
+      // transaction so it commits atomically with the money-out. Idempotent
+      // (partial-unique on (sellerOrderId, refundId) WHERE kind='REVERSAL').
+      // Only reached when we won the PROCESSED flip (didFinalize).
+      await this.tcs?.reverse(
+        tx,
+        {
+          id: refund.id,
+          amount: refund.amount,
+          sellerOrderId: refund.sellerOrderId,
+        },
+        scoped,
+      );
     });
 
     if (!didFinalize) return;
 
-    // Fire the customer refund email (soft-fail — the money already moved).
-    const customerEmail = refund.order.customer?.user?.email;
-    if (customerEmail) {
-      this.email
-        .send('order_refunded', customerEmail, {
-          customerName: refund.order.customer.user.name ?? 'there',
+    // P3-04 business counter — exactly one increment per refund (only the caller
+    // that won the PROCESSED flip reaches here). Fire-and-forget, never throws.
+    this.metrics?.recordRefundProcessed('processed');
+
+    // Best-effort audit of the PROCESSED transition, AFTER the guarded tx
+    // committed — record() never throws (P3-05). Only the caller that won the
+    // race (didFinalize) reaches here, so the trail has exactly one row.
+    await this.audit?.record({
+      action: 'refund.processed',
+      entityType: 'Refund',
+      entityId: refund.id,
+      actorUserId: refund.approvedById ?? null,
+      before: { status: RefundStatus.PROCESSING },
+      after: { status: RefundStatus.PROCESSED, amount: Number(refund.amount) },
+    });
+  }
+
+  /**
+   * Send the `order_refunded` customer email. Invoked by the outbox email worker
+   * for an `email.order_refunded` event; re-reads the refund by id. Throws on a
+   * genuine send failure so the outbox retries; skips cleanly when the send is
+   * intentionally SKIPPED or there's no recipient.
+   */
+  async sendOrderRefundedEmail(refundId: string): Promise<void> {
+    const refund = await this.prisma.refund.findUnique({
+      where: { id: refundId },
+      include: {
+        order: { include: { customer: { include: { user: true } } } },
+      },
+    });
+    if (!refund) return;
+
+    // In-app bell entry for the buyer, created BEFORE the send (both idempotent).
+    const buyerUserId = refund.order.customer?.userId ?? null;
+    if (buyerUserId) {
+      await this.notifications?.create({
+        userId: buyerUserId,
+        type: 'order_refunded',
+        title: 'Refund processed',
+        body: `A refund of ₹${round2(Number(refund.amount)).toFixed(
+          2,
+        )} for order ${refund.order.orderNumber} has been processed.`,
+        data: {
+          refundId: refund.id,
+          orderId: refund.orderId,
           orderNumber: refund.order.orderNumber,
-          refundAmount: `₹${round2(Number(refund.amount)).toFixed(2)}`,
-          orderLink: `${config.FRONTEND_URL ?? ''}/account/orders/${refund.orderId}`,
-        })
-        .catch((err) =>
-          this.logger.warn(
-            `order_refunded email failed for ${refund.orderId}: ${(err as Error).message}`,
-          ),
-        );
+          amount: Number(refund.amount),
+          link: `/account/orders/${refund.orderId}`,
+        },
+        dedupeKey: `notif:order_refunded:${refund.id}`,
+      });
+    }
+
+    const customerEmail = refund.order.customer?.user?.email;
+    if (!customerEmail) return;
+
+    const result = await this.email.send('order_refunded', customerEmail, {
+      customerName: refund.order.customer.user.name ?? 'there',
+      orderNumber: refund.order.orderNumber,
+      refundAmount: `₹${round2(Number(refund.amount)).toFixed(2)}`,
+      orderLink: `${config.FRONTEND_URL ?? ''}/account/orders/${refund.orderId}`,
+    });
+    if (!result.sent && !result.skipped) {
+      throw new Error(`order_refunded email failed: ${result.message}`);
     }
   }
 
@@ -532,6 +891,30 @@ export class RefundService {
       where: { referenceType: 'order_refund', referenceId: refundId },
     });
     if (already > 0) return;
+
+    // If this refund settles a RETURN, restock only the RETURNED quantity per
+    // variant — a partial-quantity/partial-item return must NOT restore the whole
+    // order (that would over-restock and let the seller oversell). A cancellation
+    // / whole-order refund has no linked return → caps stays null → full restore.
+    const ret = await tx.returnRequest.findFirst({
+      where: { refundId },
+      select: { items: { select: { orderItemId: true, quantity: true } } },
+    });
+    let caps: Map<string, number> | null = null;
+    if (ret) {
+      const oiIds = ret.items.map((i) => i.orderItemId);
+      const ois = await tx.orderItem.findMany({
+        where: { id: { in: oiIds } },
+        select: { id: true, variantId: true },
+      });
+      const variantByOi = new Map(ois.map((o) => [o.id, o.variantId]));
+      caps = new Map();
+      for (const it of ret.items) {
+        const vid = variantByOi.get(it.orderItemId);
+        if (!vid) continue;
+        caps.set(vid, (caps.get(vid) ?? 0) + it.quantity);
+      }
+    }
 
     for (const so of scoped) {
       const items = await tx.orderItem.findMany({
@@ -561,7 +944,15 @@ export class RefundService {
       });
 
       for (const m of movements) {
-        const restore = Math.abs(m.quantityChange);
+        let restore = Math.abs(m.quantityChange);
+        if (caps) {
+          // Return path: restore at most the returned quantity for this variant,
+          // consuming the cap across the variant's (possibly multiple) movements.
+          const remaining = caps.get(m.variantId) ?? 0;
+          if (remaining <= 0) continue; // variant not returned → don't restock
+          restore = Math.min(restore, remaining);
+          caps.set(m.variantId, remaining - restore);
+        }
         const inv = await tx.inventory.update({
           where: { id: m.inventoryId },
           data: shipped

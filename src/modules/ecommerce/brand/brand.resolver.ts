@@ -20,7 +20,7 @@ export class BrandResolver {
 
   /**
    * Public list — sellers' product create form populates the brand dropdown
-   * from this query. Returns ACTIVE brands by default.
+   * from this query. Returns ACTIVE brands by default. Public.
    */
   @Query(() => [Brand], { name: 'brands' })
   brands(
@@ -32,6 +32,7 @@ export class BrandResolver {
     return this.brandService.findAll(status ?? BrandStatus.ACTIVE, featuredOnly ?? false);
   }
 
+  /** Storefront brand landing by slug; ACTIVE brands only. Public. */
   @Query(() => Brand, { name: 'publicBrand' })
   publicBrand(@Args('slug', { type: () => String }) slug: string) {
     return this.brandService.findPublic(slug);
@@ -41,6 +42,7 @@ export class BrandResolver {
   // Admin — list with all statuses, includes inactive/deleted-recently filters
   // ---------------------------------------------------------------------------
 
+  /** Admin brand list, all statuses (no filter ⇒ ACTIVE + INACTIVE). Auth: brand:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('brand:read')
   @Query(() => [Brand], { name: 'adminBrands' })
@@ -52,6 +54,7 @@ export class BrandResolver {
     return this.brandService.findAll(status);
   }
 
+  /** Admin fetches one brand by id. Auth: brand:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('brand:read')
   @Query(() => Brand, { name: 'brand' })
@@ -60,6 +63,7 @@ export class BrandResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Creates a brand; names are globally unique (case-insensitive). Auth: brand:create. */
   @Permissions('brand:create')
   @Mutation(() => Brand)
   createBrand(@Args('createBrandInput') input: CreateBrandInput) {
@@ -67,6 +71,7 @@ export class BrandResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Edits a brand; re-checks name uniqueness on rename. Auth: brand:update. */
   @Permissions('brand:update')
   @Mutation(() => Brand)
   updateBrand(@Args('updateBrandInput') input: UpdateBrandInput) {
@@ -74,6 +79,7 @@ export class BrandResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Toggles a brand's status and/or featured flag. Auth: brand:update + brand:feature. */
   @Permissions('brand:update', 'brand:feature')
   @Mutation(() => Brand)
   setBrandStatus(@Args('setBrandStatusInput') input: SetBrandStatusInput) {
@@ -81,6 +87,7 @@ export class BrandResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Soft-deletes a brand. Auth: brand:delete. */
   @Permissions('brand:delete')
   @Mutation(() => Brand)
   removeBrand(@Args('id', { type: () => ID }) id: string) {

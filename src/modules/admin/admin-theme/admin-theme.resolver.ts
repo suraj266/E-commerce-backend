@@ -21,6 +21,7 @@ export class AdminThemeResolver {
   // Public read — fetched server-side by the (admin) layout BEFORE auth runs,
   // so it cannot require a token. Theme isn't sensitive data.
   // ---------------------------------------------------------------------------
+  /** Global admin-panel theme tokens (colors/radius/font). Public — the admin layout reads it before auth runs. */
   @Query(() => AdminTheme, { name: 'adminTheme' })
   adminTheme() {
     return this.service.findGlobal();
@@ -29,6 +30,7 @@ export class AdminThemeResolver {
   // ---------------------------------------------------------------------------
   // Admin mutations
   // ---------------------------------------------------------------------------
+  /** Admin updates the singleton admin-panel theme. Auth: theme:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('theme:update')
   @Mutation(() => AdminTheme)
@@ -39,6 +41,7 @@ export class AdminThemeResolver {
     return this.service.update(input, user?.userId);
   }
 
+  /** Reset the admin-panel theme back to brand-indigo defaults. Auth: theme:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('theme:update')
   @Mutation(() => AdminTheme)

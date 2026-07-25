@@ -2,8 +2,10 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomBytes } from 'crypto';
 import { PrismaService } from '@/prisma/prisma.service';
 import {
   computePriceWithTax,
@@ -12,6 +14,13 @@ import {
 import { AddToCartInput } from './dto/add-to-cart.input';
 import { UpdateCartItemQtyInput } from './dto/update-cart-item-qty.input';
 import { RemoveCartItemInput } from './dto/remove-cart-item.input';
+import {
+  CartValidationResult,
+  CartWarning,
+} from './entities/cart-validation.entity';
+
+/** Max units of a single variant in one cart line — matches the DTOs. */
+const MAX_LINE_QTY = 99;
 
 const PRODUCT_INCLUDE = {
   images: { orderBy: { displayOrder: 'asc' as const } },
@@ -36,8 +45,33 @@ const STOCK = {
   OUT_OF_STOCK: 'OUT_OF_STOCK',
 } as const;
 
+/**
+ * Items → hydration include, shared by the customer + guest cart loaders so
+ * both go through the exact same `hydrateCart` path.
+ */
+const CART_ITEMS_INCLUDE = {
+  items: {
+    orderBy: { createdAt: 'desc' as const },
+    include: {
+      product: { include: PRODUCT_INCLUDE },
+      // Variant.attributes is non-nullable in GraphQL — must include the
+      // relation here AND flatten it in `hydrateCart` so the resolver
+      // doesn't return undefined.
+      variant: {
+        include: {
+          attributes: {
+            include: { attribute: true, attributeValue: true },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
 @Injectable()
 export class CartService {
+  private readonly logger = new Logger(CartService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   // ---------------------------------------------------------------------------
@@ -68,6 +102,39 @@ export class CartService {
     });
     if (existing) return existing;
     return this.prisma.cart.create({ data: { customerId } });
+  }
+
+  /**
+   * Resolves a guest cart from its opaque session token, minting a fresh cart
+   * (and a new token) if `sessionToken` is absent or no longer maps to a cart.
+   * Returns the cart plus the token the caller should persist in the cookie —
+   * `tokenChanged` tells the resolver whether to (re)issue the cookie.
+   */
+  private async getOrCreateGuestCart(sessionToken?: string | null) {
+    if (sessionToken) {
+      const existing = await this.prisma.cart.findUnique({
+        where: { sessionToken },
+      });
+      if (existing) {
+        return { cart: existing, sessionToken, tokenChanged: false };
+      }
+    }
+    // No usable token — mint a new opaque one. 32 random bytes hex = 64 chars,
+    // the same entropy the auth tokens use.
+    const fresh = randomBytes(32).toString('hex');
+    const cart = await this.prisma.cart.create({
+      data: { sessionToken: fresh },
+    });
+    return { cart, sessionToken: fresh, tokenChanged: true };
+  }
+
+  /** Re-reads a cart by id with the full item include, then hydrates it. */
+  private async loadHydratedCartById(cartId: string) {
+    const fresh = await this.prisma.cart.findUnique({
+      where: { id: cartId },
+      include: CART_ITEMS_INCLUDE,
+    });
+    return this.hydrateCart(fresh);
   }
 
   /**
@@ -273,28 +340,61 @@ export class CartService {
 
   private async loadHydratedCart(customerId: string) {
     const cart = await this.getOrCreateCart(customerId);
-    const fresh = await this.prisma.cart.findUnique({
-      where: { id: cart.id },
-      include: {
-        items: {
-          orderBy: { createdAt: 'desc' },
-          include: {
-            product: { include: PRODUCT_INCLUDE },
-            // Variant.attributes is non-nullable in GraphQL — must include
-            // the relation here AND flatten it in `hydrateCart` below so
-            // the resolver doesn't return undefined.
-            variant: {
-              include: {
-                attributes: {
-                  include: { attribute: true, attributeValue: true },
-                },
-              },
-            },
-          },
-        },
-      },
+    return this.loadHydratedCartById(cart.id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Item mutation cores — operate on an already-resolved cart row so the
+  // customer + guest entry points share one implementation.
+  // ---------------------------------------------------------------------------
+
+  private async addItemToCart(
+    cartId: string,
+    variantId: string,
+    productId: string,
+    unitPrice: unknown,
+    qtyToAdd: number,
+  ) {
+    const existing = await this.prisma.cartItem.findUnique({
+      where: { cartId_variantId: { cartId, variantId } },
     });
-    return this.hydrateCart(fresh);
+    if (existing) {
+      const newQty = Math.min(MAX_LINE_QTY, existing.quantity + qtyToAdd);
+      await this.prisma.cartItem.update({
+        where: { id: existing.id },
+        data: { quantity: newQty },
+      });
+    } else {
+      await this.prisma.cartItem.create({
+        data: {
+          cartId,
+          productId,
+          variantId,
+          quantity: Math.min(MAX_LINE_QTY, qtyToAdd),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          unitPriceSnapshot: unitPrice as any,
+        },
+      });
+    }
+  }
+
+  private async setItemQty(cartId: string, variantId: string, quantity: number) {
+    const existing = await this.prisma.cartItem.findUnique({
+      where: { cartId_variantId: { cartId, variantId } },
+    });
+    if (!existing) return;
+    if (quantity === 0) {
+      await this.prisma.cartItem.delete({ where: { id: existing.id } });
+    } else {
+      await this.prisma.cartItem.update({
+        where: { id: existing.id },
+        data: { quantity: Math.min(MAX_LINE_QTY, quantity) },
+      });
+    }
+  }
+
+  private async removeItem(cartId: string, variantId: string) {
+    await this.prisma.cartItem.deleteMany({ where: { cartId, variantId } });
   }
 
   // ---------------------------------------------------------------------------
@@ -329,31 +429,14 @@ export class CartService {
     const customerId = await this.getCustomerId(userId);
     const variant = await this.loadPurchaseableVariant(input.variantId);
     const cart = await this.getOrCreateCart(customerId);
-    const qtyToAdd = input.quantity ?? 1;
 
-    // Atomic upsert: increment if exists else create with snapshot price.
-    const existing = await this.prisma.cartItem.findUnique({
-      where: {
-        cartId_variantId: { cartId: cart.id, variantId: variant.id },
-      },
-    });
-    if (existing) {
-      const newQty = Math.min(99, existing.quantity + qtyToAdd);
-      await this.prisma.cartItem.update({
-        where: { id: existing.id },
-        data: { quantity: newQty },
-      });
-    } else {
-      await this.prisma.cartItem.create({
-        data: {
-          cartId: cart.id,
-          productId: variant.productId,
-          variantId: variant.id,
-          quantity: qtyToAdd,
-          unitPriceSnapshot: variant.price,
-        },
-      });
-    }
+    await this.addItemToCart(
+      cart.id,
+      variant.id,
+      variant.productId,
+      variant.price,
+      input.quantity ?? 1,
+    );
 
     return this.loadHydratedCart(customerId);
   }
@@ -363,21 +446,7 @@ export class CartService {
     const cart = await this.prisma.cart.findUnique({ where: { customerId } });
     if (!cart) return this.loadHydratedCart(customerId);
 
-    const existing = await this.prisma.cartItem.findUnique({
-      where: {
-        cartId_variantId: { cartId: cart.id, variantId: input.variantId },
-      },
-    });
-    if (!existing) return this.loadHydratedCart(customerId);
-
-    if (input.quantity === 0) {
-      await this.prisma.cartItem.delete({ where: { id: existing.id } });
-    } else {
-      await this.prisma.cartItem.update({
-        where: { id: existing.id },
-        data: { quantity: input.quantity },
-      });
-    }
+    await this.setItemQty(cart.id, input.variantId, input.quantity);
     return this.loadHydratedCart(customerId);
   }
 
@@ -386,9 +455,7 @@ export class CartService {
     const cart = await this.prisma.cart.findUnique({ where: { customerId } });
     if (!cart) return this.loadHydratedCart(customerId);
 
-    await this.prisma.cartItem.deleteMany({
-      where: { cartId: cart.id, variantId: input.variantId },
-    });
+    await this.removeItem(cart.id, input.variantId);
     return this.loadHydratedCart(customerId);
   }
 
@@ -398,5 +465,244 @@ export class CartService {
     if (!cart) return this.loadHydratedCart(customerId);
     await this.prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
     return this.loadHydratedCart(customerId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Guest cart (cookie-scoped, unauthenticated)
+  // ---------------------------------------------------------------------------
+  //
+  // Guest entry points return `{ cart, sessionToken, tokenChanged }`. The
+  // resolver mints/refreshes the httpOnly cookie whenever `tokenChanged` is
+  // true (i.e. a brand-new guest cart was created on this call).
+
+  /** Read a guest cart by token. Returns null when the token maps to nothing. */
+  async guestCartByToken(sessionToken?: string | null) {
+    if (!sessionToken) return null;
+    const cart = await this.prisma.cart.findUnique({ where: { sessionToken } });
+    if (!cart) return null;
+    return this.loadHydratedCartById(cart.id);
+  }
+
+  async addGuest(sessionToken: string | null | undefined, input: AddToCartInput) {
+    const variant = await this.loadPurchaseableVariant(input.variantId);
+    const { cart, sessionToken: token, tokenChanged } =
+      await this.getOrCreateGuestCart(sessionToken);
+
+    await this.addItemToCart(
+      cart.id,
+      variant.id,
+      variant.productId,
+      variant.price,
+      input.quantity ?? 1,
+    );
+
+    const hydrated = await this.loadHydratedCartById(cart.id);
+    return { cart: hydrated, sessionToken: token, tokenChanged };
+  }
+
+  async updateQtyGuest(
+    sessionToken: string | null | undefined,
+    input: UpdateCartItemQtyInput,
+  ) {
+    const { cart, sessionToken: token, tokenChanged } =
+      await this.getOrCreateGuestCart(sessionToken);
+    await this.setItemQty(cart.id, input.variantId, input.quantity);
+    const hydrated = await this.loadHydratedCartById(cart.id);
+    return { cart: hydrated, sessionToken: token, tokenChanged };
+  }
+
+  async removeGuest(
+    sessionToken: string | null | undefined,
+    input: RemoveCartItemInput,
+  ) {
+    const { cart, sessionToken: token, tokenChanged } =
+      await this.getOrCreateGuestCart(sessionToken);
+    await this.removeItem(cart.id, input.variantId);
+    const hydrated = await this.loadHydratedCartById(cart.id);
+    return { cart: hydrated, sessionToken: token, tokenChanged };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Merge-on-login
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Folds a guest cart into the customer's cart: for every guest line, sum the
+   * quantity into the matching customer line (dedupe by variantId, capped at
+   * MAX_LINE_QTY) or move the line over. The guest cart is then deleted, which
+   * cascade-deletes its items. Returns the hydrated CUSTOMER cart.
+   *
+   * Best-effort by contract — the login path wraps this in try/catch so a merge
+   * failure never blocks sign-in. Resolves the Customer.id itself so callers
+   * (auth login) only need the userId + the guest token.
+   */
+  async mergeGuestIntoCustomer(userId: string, sessionToken?: string | null) {
+    const customerId = await this.getCustomerId(userId);
+
+    if (!sessionToken) {
+      return this.loadHydratedCart(customerId);
+    }
+
+    const guestCart = await this.prisma.cart.findUnique({
+      where: { sessionToken },
+      include: { items: true },
+    });
+
+    // Nothing to merge — just return the (possibly empty) customer cart.
+    if (!guestCart || guestCart.items.length === 0) {
+      if (guestCart) {
+        await this.prisma.cart
+          .delete({ where: { id: guestCart.id } })
+          .catch(() => undefined);
+      }
+      return this.loadHydratedCart(customerId);
+    }
+
+    const customerCart = await this.getOrCreateCart(customerId);
+
+    // Existing customer lines, indexed by variant, so we can sum/dedupe.
+    const existingItems = await this.prisma.cartItem.findMany({
+      where: { cartId: customerCart.id },
+    });
+    const byVariant = new Map(existingItems.map((i) => [i.variantId, i]));
+
+    for (const gi of guestCart.items) {
+      const match = byVariant.get(gi.variantId);
+      if (match) {
+        const newQty = Math.min(MAX_LINE_QTY, match.quantity + gi.quantity);
+        await this.prisma.cartItem.update({
+          where: { id: match.id },
+          data: { quantity: newQty },
+        });
+      } else {
+        // Move the line to the customer cart, preserving its snapshot price.
+        await this.prisma.cartItem.create({
+          data: {
+            cartId: customerCart.id,
+            productId: gi.productId,
+            variantId: gi.variantId,
+            quantity: Math.min(MAX_LINE_QTY, gi.quantity),
+            unitPriceSnapshot: gi.unitPriceSnapshot,
+          },
+        });
+      }
+    }
+
+    // Drop the guest cart (cascade removes its items + frees the token).
+    await this.prisma.cart
+      .delete({ where: { id: guestCart.id } })
+      .catch(() => undefined);
+
+    return this.loadHydratedCart(customerId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Validation (advisory, read-only — NEVER mutates or throws)
+  // ---------------------------------------------------------------------------
+  //
+  // Reuses hydrateCart internals (availableQuantity / stockState / priceChanged)
+  // to surface adjustable warnings on cart view + pre-checkout. This is NOT the
+  // authoritative oversell guard — Phase-1's guarded stock check at order
+  // placement stays the source of truth.
+
+  async validateCustomerCart(userId: string): Promise<CartValidationResult> {
+    try {
+      const customerId = await this.getCustomerId(userId);
+      const cart = await this.prisma.cart.findUnique({ where: { customerId } });
+      if (!cart) return { valid: true, warnings: [] };
+      const hydrated = await this.loadHydratedCartById(cart.id);
+      return this.buildValidation(hydrated);
+    } catch {
+      // Non-customer accounts (admin/seller) or any transient failure — the
+      // contract is advisory + never-throw, so degrade to "valid".
+      return { valid: true, warnings: [] };
+    }
+  }
+
+  async validateGuestCart(
+    sessionToken?: string | null,
+  ): Promise<CartValidationResult> {
+    try {
+      if (!sessionToken) return { valid: true, warnings: [] };
+      const cart = await this.prisma.cart.findUnique({
+        where: { sessionToken },
+      });
+      if (!cart) return { valid: true, warnings: [] };
+      const hydrated = await this.loadHydratedCartById(cart.id);
+      return this.buildValidation(hydrated);
+    } catch {
+      return { valid: true, warnings: [] };
+    }
+  }
+
+  /** Turns a hydrated cart into the typed warning list. Pure — no I/O. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private buildValidation(hydrated: any): CartValidationResult {
+    const warnings: CartWarning[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const item of hydrated?.items ?? []) {
+      const name: string =
+        item.product?.name ?? item.variant?.name ?? 'This item';
+      const available: number = Number(item.availableQuantity ?? 0);
+
+      // Product/variant delisted, deleted, or no longer ACTIVE → UNAVAILABLE.
+      const productGone =
+        !item.product ||
+        item.product.deletedAt != null ||
+        item.product.status !== 'ACTIVE';
+      const variantGone = !item.variant || item.variant.deletedAt != null;
+
+      if (productGone || variantGone) {
+        warnings.push({
+          variantId: item.variantId,
+          code: 'UNAVAILABLE',
+          message: `${name} is no longer available and should be removed.`,
+          availableQuantity: null,
+          suggestedQuantity: 0,
+          oldPrice: null,
+          newPrice: null,
+        });
+        // A gone item can't also be "reduced"/"oos"; still flag price drift
+        // below is pointless, so continue to the next line.
+        continue;
+      }
+
+      if (available <= 0) {
+        warnings.push({
+          variantId: item.variantId,
+          code: 'OUT_OF_STOCK',
+          message: `${name} is out of stock.`,
+          availableQuantity: 0,
+          suggestedQuantity: 0,
+          oldPrice: null,
+          newPrice: null,
+        });
+      } else if (available < item.quantity) {
+        warnings.push({
+          variantId: item.variantId,
+          code: 'REDUCED_QUANTITY',
+          message: `Only ${available} of ${name} left — reduce the quantity to continue.`,
+          availableQuantity: available,
+          suggestedQuantity: available,
+          oldPrice: null,
+          newPrice: null,
+        });
+      }
+
+      // Price drift is orthogonal to stock — a line can warrant both.
+      if (item.priceChanged) {
+        warnings.push({
+          variantId: item.variantId,
+          code: 'PRICE_CHANGED',
+          message: `The price of ${name} changed since you added it.`,
+          availableQuantity: null,
+          suggestedQuantity: null,
+          oldPrice: Number(item.unitPriceSnapshot),
+          newPrice: Number(item.unitPriceCurrent),
+        });
+      }
+    }
+
+    return { valid: warnings.length === 0, warnings };
   }
 }

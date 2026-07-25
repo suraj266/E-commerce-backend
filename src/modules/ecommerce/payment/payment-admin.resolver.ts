@@ -34,6 +34,7 @@ export class PaymentAdminResolver {
   // Gateway Config CRUD
   // ---------------------------------------------------------------------------
 
+  /** Lists all configured payment gateways (credentials masked). Auth: payment:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:read')
   @Query(() => [PaymentGatewayConfigEntity], { name: 'adminPaymentGateways' })
@@ -41,6 +42,7 @@ export class PaymentAdminResolver {
     return this.configService.list();
   }
 
+  /** Fetches one gateway config by id (credentials masked). Auth: payment:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:read')
   @Query(() => PaymentGatewayConfigEntity, { name: 'adminPaymentGateway' })
@@ -48,6 +50,7 @@ export class PaymentAdminResolver {
     return this.configService.getById(id);
   }
 
+  /** Creates a gateway config; encrypts credentials at rest. Auth: payment:create permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:create')
   @Mutation(() => PaymentGatewayConfigEntity, {
@@ -57,6 +60,7 @@ export class PaymentAdminResolver {
     return this.configService.create(input);
   }
 
+  /** Updates a gateway config; re-encrypts credentials only when new ones are supplied. Auth: payment:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:update')
   @Mutation(() => PaymentGatewayConfigEntity, {
@@ -66,6 +70,7 @@ export class PaymentAdminResolver {
     return this.configService.update(input);
   }
 
+  /** Enables/disables a gateway on the checkout page. Auth: payment:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:update')
   @Mutation(() => PaymentGatewayConfigEntity, {
@@ -78,6 +83,7 @@ export class PaymentAdminResolver {
     return this.configService.toggleEnabled(id, enabled);
   }
 
+  /** Sets one gateway as the checkout default; unsets any prior default. Auth: payment:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:update')
   @Mutation(() => PaymentGatewayConfigEntity, {
@@ -91,6 +97,7 @@ export class PaymentAdminResolver {
   // Transactions (read-only admin view)
   // ---------------------------------------------------------------------------
 
+  /** Paginated read-only view of payment transactions, filterable by gateway/status. Auth: payment:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('payment:read')
   @Query(() => PaginatedPayments, { name: 'adminPaymentTransactions' })

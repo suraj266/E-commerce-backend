@@ -1,4 +1,4 @@
-import { IsEmail, IsIn, IsNotEmpty, IsOptional, MinLength } from "class-validator";
+import { IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, MinLength } from "class-validator";
 
 /**
  * Allowed surface for `accountType` — restricts which role can authenticate
@@ -24,4 +24,14 @@ export class LoginUserDto {
     @IsOptional()
     @IsIn(['customer', 'seller', 'admin'])
     accountType?: LoginAccountType;
+
+    /**
+     * Opaque guest-cart session token (from the httpOnly `guestCartToken`
+     * cookie, injected by the login controller). When present, the guest cart
+     * is merged into this customer's cart on successful login — best-effort,
+     * soft-fail: a merge failure NEVER blocks sign-in.
+     */
+    @IsOptional()
+    @IsString()
+    guestCartToken?: string;
 }

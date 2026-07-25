@@ -5,11 +5,13 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Prisma } from '@prisma/client';
 import * as Handlebars from 'handlebars';
 import * as puppeteer from 'puppeteer';
 import sharp from 'sharp';
 import { PrismaService } from '@/prisma/prisma.service';
 import { SiteSettingService } from '@/modules/admin/site-setting/site-setting.service';
+import { MetricsService } from '@/modules/observability/metrics/metrics.service';
 import { InvoiceNumberService } from './invoice-number.service';
 import { InvoiceStorageService } from './invoice-storage.service';
 import { InvoiceTemplateService } from './invoice-template.service';
@@ -58,12 +60,77 @@ export class InvoiceService {
     private readonly templates: InvoiceTemplateService,
     private readonly config: ConfigService,
     private readonly siteSettings: SiteSettingService,
+    // Optional trailing param (MetricsModule is @Global). The counter is a
+    // fire-and-forget side effect guarded with `?.` — never fails a render.
+    private readonly metrics?: MetricsService,
   ) {
     this.registerHelpers();
   }
 
   /**
+   * Reserve (allocate + persist) the invoice number for a SellerOrder WITHOUT
+   * rendering — the load-bearing half of the GST-sequence-safety fix.
+   *
+   * Idempotent: if a number is already bound, it's returned as-is. Otherwise a
+   * number is allocated and persisted onto the SellerOrder in ONE transaction,
+   * so the sequence counter and the bound number commit together. A row-level
+   * `FOR UPDATE` lock serialises the (rare) concurrent reserve of the same
+   * SellerOrder so a duplicate reserve can never burn a second number.
+   *
+   * Because allocation is now separate from the Puppeteer render + S3 upload, a
+   * render/upload failure never advances the per-seller GST sequence (CGST Rule
+   * 46). A retry re-renders under the SAME reserved number → the counter
+   * advances exactly once per invoice.
+   */
+  async reserveInvoiceNumber(
+    sellerOrderId: string,
+  ): Promise<{ invoiceNumber: string; invoiceDate: Date }> {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<
+        {
+          id: string;
+          sellerId: string;
+          invoiceNumber: string | null;
+          invoiceDate: Date | null;
+        }[]
+      >(
+        Prisma.sql`SELECT "id", "sellerId", "invoiceNumber", "invoiceDate" FROM "SellerOrder" WHERE "id" = ${sellerOrderId} FOR UPDATE`,
+      );
+      if (rows.length === 0) {
+        throw new NotFoundException(`Seller order ${sellerOrderId} not found`);
+      }
+      const so = rows[0];
+      // Already reserved (a prior attempt, or the regenerate path) — reuse it.
+      if (so.invoiceNumber && so.invoiceDate) {
+        return {
+          invoiceNumber: so.invoiceNumber,
+          invoiceDate: so.invoiceDate,
+        };
+      }
+
+      const allocated = await this.numberSvc.allocateInTx(tx, so.sellerId);
+      await tx.sellerOrder.update({
+        where: { id: sellerOrderId },
+        data: {
+          invoiceNumber: allocated.invoiceNumber,
+          invoiceDate: allocated.invoiceDate,
+        },
+      });
+      return allocated;
+    });
+  }
+
+  /**
    * Idempotent invoice generation for one SellerOrder.
+   *
+   * Order of operations (GST-safe):
+   *   1. if `invoiceUrl` is already set → return the cached URL.
+   *   2. reserve the invoice number (allocate + persist, in its own tx).
+   *   3. build context consuming the RESERVED number, render HTML → PDF, upload.
+   *   4. persist ONLY `invoiceUrl` on success.
+   *
+   * A failure in step 3 leaves the reserved number bound but `invoiceUrl` null;
+   * a retry re-renders under the same number. The sequence is never burned.
    *
    * Returns the public URL where the PDF lives.
    */
@@ -74,7 +141,14 @@ export class InvoiceService {
     });
     if (existing?.invoiceUrl) return existing.invoiceUrl;
 
-    const ctx = await this.buildContext(sellerOrderId);
+    // Allocate + bind the number BEFORE the render, so a render/upload failure
+    // can never burn a GST sequence number.
+    const reserved = await this.reserveInvoiceNumber(sellerOrderId);
+
+    const ctx = await this.buildContext(sellerOrderId, {
+      forceInvoiceNumber: reserved.invoiceNumber,
+      forceInvoiceDate: reserved.invoiceDate,
+    });
     const html = await this.renderHtml(ctx);
     const pdf = await this.renderPdf(html);
     const url = await this.storage.putPdf(
@@ -83,14 +157,16 @@ export class InvoiceService {
       pdf,
     );
 
+    // Only `invoiceUrl` is written here — the number + date were persisted by
+    // reserveInvoiceNumber above.
     await this.prisma.sellerOrder.update({
       where: { id: sellerOrderId },
-      data: {
-        invoiceNumber: ctx.invoiceNumber,
-        invoiceDate: ctx.invoiceDate,
-        invoiceUrl: url,
-      },
+      data: { invoiceUrl: url },
     });
+
+    // A tax invoice was rendered + uploaded (this line is past the early-return
+    // cache hit, so it counts genuinely-new renders only). Side-effect-only.
+    this.metrics?.recordInvoiceGenerated();
 
     this.logger.log(
       `Invoice ${ctx.invoiceNumber} generated for seller-order ${sellerOrderId}`,
@@ -135,6 +211,8 @@ export class InvoiceService {
       where: { id: sellerOrderId },
       data: { invoiceUrl: url },
     });
+    // A tax invoice PDF was re-rendered + re-uploaded. Side-effect-only.
+    this.metrics?.recordInvoiceGenerated();
     this.logger.log(`Invoice ${so.invoiceNumber} regenerated`);
     return url;
   }

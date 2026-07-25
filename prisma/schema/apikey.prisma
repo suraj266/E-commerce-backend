@@ -1,0 +1,56 @@
+/// =============================================================================
+/// ApiKey — programmatic access key for sellers / admins (Phase 3, Wave 4).
+/// =============================================================================
+///
+/// Supersedes the never-used identity stub that previously lived in user.prisma
+/// (columns userId + permissions JSON). CENTRAL-WIRING: that stub `model ApiKey`
+/// block must be REMOVED from user.prisma (keep the `apiKeys ApiKey[]` back-
+/// relation field on User — it pairs with `owner` below). The hand-authored
+/// migration ALTERs the existing (empty) "ApiKey" table into this shape rather
+/// than recreating it, so no data is dropped and the FK/index are renamed.
+///
+/// SECURITY — the plaintext secret is NEVER stored. On create the service mints
+/// `sk_<prefix>_<secret>` and returns it exactly ONCE; only `keyHash`
+/// (SHA-256 hex of the full plaintext) and the public `keyPrefix` are persisted.
+/// Authentication (ApiKeyGuard) is a single-row lookup by the UNIQUE `keyPrefix`
+/// followed by a constant-time compare of SHA-256(presented) against `keyHash`
+/// (timingSafeEqualStr). A key authenticates iff:
+///     revokedAt IS NULL AND (expiresAt IS NULL OR expiresAt > now())
+///
+/// The 24-byte (192-bit) random secret is high-entropy, so a fast hash (SHA-256)
+/// is appropriate here — unlike a human password, it is not brute-forceable, so
+/// argon2's slow-KDF hardening buys nothing while adding a dependency.
+model ApiKey {
+  id String @id @default(uuid())
+
+  /// Human label shown in the admin list (e.g. "CI deploy bot").
+  name String
+
+  /// Public, non-secret lookup handle — the leading token of the plaintext
+  /// (`sk_<16 hex>`). UNIQUE so verify() resolves a single row before the
+  /// constant-time hash compare. Safe to display/log.
+  keyPrefix String @unique
+
+  /// SHA-256 hex of the FULL plaintext secret. Never the plaintext itself.
+  keyHash String @unique
+
+  /// Granted scope slugs (e.g. `orders:read`, `products:write`). Empty = none.
+  scopes String[] @default([])
+
+  /// Owning user (seller/admin). Cascade-deleted with the user.
+  ownerUserId String
+
+  /// Bumped (best-effort) by ApiKeyGuard on each successful authentication.
+  lastUsedAt DateTime?
+  /// Optional hard expiry. NULL = never expires.
+  expiresAt DateTime?
+  /// Set once when revoked; a revoked key can never authenticate again. The
+  /// revoke path is a winner-elect updateMany({ where:{ id, revokedAt:null }}).
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  owner User @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@index([ownerUserId])
+}

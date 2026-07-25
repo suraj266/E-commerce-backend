@@ -23,6 +23,7 @@ export class LabelResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin list of all labels (MANUAL + AUTO, any state). Auth: label:read. */
   @Permissions('label:read')
   @Query(() => [Label], { name: 'adminLabels' })
   adminLabels() {
@@ -30,6 +31,7 @@ export class LabelResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin fetches one label by id. Auth: label:read. */
   @Permissions('label:read')
   @Query(() => Label, { name: 'label' })
   label(@Args('id', { type: () => ID }) id: string) {
@@ -37,6 +39,7 @@ export class LabelResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Creates a MANUAL or AUTO (rule-based) label; key must be unique. Auth: label:create. */
   @Permissions('label:create')
   @Mutation(() => Label)
   createLabel(@Args('createLabelInput') input: CreateLabelInput) {
@@ -44,6 +47,7 @@ export class LabelResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Edits a label; re-validates the rule on type/rule change. Auth: label:update. */
   @Permissions('label:update')
   @Mutation(() => Label)
   updateLabel(@Args('updateLabelInput') input: UpdateLabelInput) {
@@ -51,6 +55,7 @@ export class LabelResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Soft-deletes a label; system labels can't be deleted. Auth: label:delete. */
   @Permissions('label:delete')
   @Mutation(() => Label)
   removeLabel(@Args('id', { type: () => ID }) id: string) {

@@ -23,6 +23,7 @@ import {
   AwbResult,
   CourierContext,
   CourierLoginResult,
+  CreateReturnShipmentRequest,
   CreateShipmentRequest,
   ICourierProvider,
   LabelResult,
@@ -271,6 +272,79 @@ export class ShiprocketProvider implements ICourierProvider {
     }
     return {
       providerOrderId: String(providerOrderId ?? req.orderNumber),
+      providerShipmentId: String(providerShipmentId),
+    };
+  }
+
+  /**
+   * Reverse (return) order — POST /orders/create/return. Pickup is the BUYER,
+   * delivery is the SELLER's return address. Response shape mirrors the forward
+   * adhoc create ({ order_id, shipment_id }). Non-idempotent write (never retried).
+   *
+   * // NEEDS VERIFICATION against a live Shiprocket account — the return schema
+   *    (field names, required seller-GST/pickup fields) varies by plan.
+   */
+  async createReturnShipment(
+    ctx: CourierContext,
+    req: CreateReturnShipmentRequest,
+  ): Promise<ShipmentResult> {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const d = req.orderDate;
+    const orderDate = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+    const body = {
+      order_id: req.returnNumber,
+      order_date: orderDate,
+      channel_id: '',
+      pickup_customer_name: req.customer.name,
+      pickup_last_name: req.customer.lastName ?? '',
+      pickup_address: req.customer.addressLine1,
+      pickup_address_2: req.customer.addressLine2 ?? '',
+      pickup_city: req.customer.city,
+      pickup_state: req.customer.state,
+      pickup_country: req.customer.country,
+      pickup_pincode: req.customer.pincode,
+      pickup_email: req.customer.email ?? '',
+      pickup_phone: req.customer.phone,
+      shipping_customer_name: req.seller.name,
+      shipping_last_name: req.seller.lastName ?? '',
+      shipping_address: req.seller.addressLine1,
+      shipping_address_2: req.seller.addressLine2 ?? '',
+      shipping_city: req.seller.city,
+      shipping_country: req.seller.country,
+      shipping_pincode: req.seller.pincode,
+      shipping_state: req.seller.state,
+      shipping_phone: req.seller.phone,
+      order_items: req.items.map((it) => ({
+        name: it.name,
+        sku: it.sku,
+        units: it.units,
+        selling_price: it.sellingPrice,
+        hsn: it.hsn ?? '',
+      })),
+      payment_method: 'Prepaid',
+      sub_total: req.subTotal,
+      length: req.dimensionsCm.length,
+      breadth: req.dimensionsCm.breadth,
+      height: req.dimensionsCm.height,
+      weight: req.weightKg,
+    };
+
+    const data = await this.request<any>('/orders/create/return', {
+      method: 'POST',
+      token: ctx.token,
+      body,
+      mode: 'write', // non-idempotent: a retry could create a duplicate return
+    });
+    const providerOrderId = data?.order_id ?? data?.data?.order_id;
+    const providerShipmentId = data?.shipment_id ?? data?.data?.shipment_id;
+    if (!providerShipmentId) {
+      throw new Error(
+        `Shiprocket return created but no shipment_id returned: ${JSON.stringify(data)}`,
+      );
+    }
+    return {
+      providerOrderId: String(providerOrderId ?? req.returnNumber),
       providerShipmentId: String(providerShipmentId),
     };
   }

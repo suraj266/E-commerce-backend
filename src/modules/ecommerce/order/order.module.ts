@@ -4,6 +4,8 @@ import { OrderPlacementService } from './order-placement.service';
 import { OrderResolver } from './order.resolver';
 import { SellerOrderService } from './seller-order.service';
 import { SellerOrderResolver } from './seller-order.resolver';
+import { OrderAdminService } from './order-admin.service';
+import { OrderAdminResolver } from './order-admin.resolver';
 import { EmailModule } from '@/modules/admin/email/email.module';
 import { CouponModule } from '@/modules/ecommerce/coupon/coupon.module';
 import { InvoiceModule } from '@/modules/ecommerce/invoice/invoice.module';
@@ -29,6 +31,8 @@ import { CourierModule } from '@/modules/ecommerce/courier/courier.module';
     SellerOrderService,
     OrderResolver,
     SellerOrderResolver,
+    OrderAdminService,
+    OrderAdminResolver,
   ],
   exports: [OrderService, SellerOrderService, OrderPlacementService],
 })

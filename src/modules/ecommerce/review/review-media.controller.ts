@@ -82,6 +82,7 @@ export class ReviewMediaController {
   // Upload
   // ---------------------------------------------------------------------------
 
+  /** POST /media/review/upload — upload a review image/video (magic-byte checked; images re-encoded to 1080px webp). Auth: logged-in user. */
   @Post('upload')
   @HttpCode(200)
   @UseGuards(JwtAuthGuard)

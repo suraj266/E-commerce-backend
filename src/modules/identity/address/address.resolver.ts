@@ -15,11 +15,13 @@ import { UpdateAddressInput } from './dto/update-address.input';
 export class AddressResolver {
   constructor(private readonly addressService: AddressService) {}
 
+  /** Lists the caller's saved addresses, default first. Auth: logged-in user. */
   @Query(() => [Address], { name: 'myAddresses' })
   myAddresses(@CurrentUser() user: CurrentUserPayload) {
     return this.addressService.myAddresses(user.userId);
   }
 
+  /** Adds an address for the caller; the first-ever address is forced default. Auth: logged-in user. */
   @Mutation(() => Address)
   addMyAddress(
     @CurrentUser() user: CurrentUserPayload,
@@ -28,6 +30,7 @@ export class AddressResolver {
     return this.addressService.create(user.userId, input);
   }
 
+  /** Edits one of the caller's addresses; unsetting the last default is rejected. Auth: logged-in user. */
   @Mutation(() => Address)
   updateMyAddress(
     @CurrentUser() user: CurrentUserPayload,
@@ -36,6 +39,7 @@ export class AddressResolver {
     return this.addressService.update(user.userId, input);
   }
 
+  /** Promotes one of the caller's addresses to default, demoting the rest. Auth: logged-in user. */
   @Mutation(() => Address)
   setMyDefaultAddress(
     @CurrentUser() user: CurrentUserPayload,
@@ -44,6 +48,7 @@ export class AddressResolver {
     return this.addressService.setDefault(user.userId, id);
   }
 
+  /** Hard-deletes one of the caller's addresses; auto-promotes another if it was default. Auth: logged-in user. */
   @Mutation(() => Address)
   removeMyAddress(
     @CurrentUser() user: CurrentUserPayload,

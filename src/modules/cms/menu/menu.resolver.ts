@@ -16,6 +16,7 @@ export class MenuResolver {
   // Public — storefront header/footer fetch by location
   // ---------------------------------------------------------------------------
 
+  /** Public storefront menu tree by location (header/footer); only active, non-deleted menus. Public. */
   @Query(() => Menu, { name: 'publicMenu' })
   publicMenu(@Args('location', { type: () => MenuLocation }) location: MenuLocation) {
     return this.menuService.findPublic(location);
@@ -25,6 +26,7 @@ export class MenuResolver {
   // Admin
   // ---------------------------------------------------------------------------
 
+  /** Admin list of all menus across locations. Auth: menu:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('menu:read')
   @Query(() => [Menu], { name: 'adminMenus' })
@@ -32,6 +34,7 @@ export class MenuResolver {
     return this.menuService.findAllAdmin();
   }
 
+  /** Admin fetch of one menu by location, including inactive. Auth: menu:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('menu:read')
   @Query(() => Menu, { name: 'adminMenu' })
@@ -41,6 +44,7 @@ export class MenuResolver {
     return this.menuService.findOneAdmin(location);
   }
 
+  /** Create-or-replace a location's menu (one per location); revives a soft-deleted one. Auth: menu:update + menu:create. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('menu:update', 'menu:create')
   @Mutation(() => Menu)
@@ -48,6 +52,7 @@ export class MenuResolver {
     return this.menuService.upsert(input);
   }
 
+  /** Toggle a menu's active/published flag by location. Auth: menu:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('menu:update')
   @Mutation(() => Menu)
@@ -58,6 +63,7 @@ export class MenuResolver {
     return this.menuService.setActive(location, isActive);
   }
 
+  /** Soft-delete a location's menu (also deactivates it). Auth: menu:delete. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('menu:delete')
   @Mutation(() => Menu)

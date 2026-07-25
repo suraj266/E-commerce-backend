@@ -31,6 +31,15 @@ export class Seller {
   @Field(() => String, { nullable: true })
   gstin?: string | null;
 
+  // GST place-of-supply state, stored + derived from the GSTIN prefix in
+  // SellerService. Exposed so the storefront/admin can display it (the frontend
+  // SellerFields fragment has always queried these — this closes that drift).
+  @Field(() => String, { nullable: true })
+  stateCode?: string | null;
+
+  @Field(() => String, { nullable: true })
+  stateName?: string | null;
+
   @Field(() => String)
   businessEmail: string;
 

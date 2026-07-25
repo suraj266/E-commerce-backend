@@ -16,12 +16,14 @@ import { LabelService } from './label.service';
 export class ProductLabelsResolver {
   constructor(private readonly labelService: LabelService) {}
 
+  /** Computed badges on a Product = MANUAL + matching AUTO labels, priority-sorted. Inherits the parent query's auth. */
   @ResolveField(() => [ProductBadge], { name: 'labels' })
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   resolveLabels(@Parent() product: any): Promise<ProductBadge[]> {
     return this.labelService.deriveBadges(product);
   }
 
+  /** Raw MANUAL label ids on a Product, so the seller form can pre-select its picker. Inherits the parent query's auth. */
   @ResolveField(() => [ID], { name: 'assignedLabelIds' })
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   resolveAssignedLabelIds(@Parent() product: any): string[] {

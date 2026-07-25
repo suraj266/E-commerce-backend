@@ -28,6 +28,7 @@ export class InvoiceController {
     this.uploadDir = config.get<string>('LOCAL_UPLOAD_DIR', '/app/uploads');
   }
 
+  /** GET /invoices/:sellerId/:filename — stream a generated invoice PDF inline from disk (path-traversal guarded). Public. */
   @Get(':sellerId/:filename')
   async serve(
     @Param('sellerId') sellerId: string,

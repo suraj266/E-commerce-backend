@@ -1,5 +1,5 @@
 import { Role } from '@/modules/identity/role/entities/role.entity';
-import { ObjectType, Field, ID } from '@nestjs/graphql';
+import { ObjectType, Field, ID, Int } from '@nestjs/graphql';
 
 @ObjectType()
 export class User {
@@ -47,4 +47,23 @@ export class User {
 
   @Field(() => Date)
   updatedAt?: Date;
+}
+
+/** Server-paginated admin user list (Phase 3 Wave 4). */
+@ObjectType()
+export class PaginatedUsers {
+  @Field(() => [User])
+  items: User[];
+
+  @Field(() => Int)
+  totalCount: number;
+
+  @Field(() => Int)
+  totalPages: number;
+
+  @Field(() => Int)
+  currentPage: number;
+
+  @Field(() => Int)
+  pageSize: number;
 }

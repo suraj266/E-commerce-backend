@@ -23,6 +23,7 @@ export class SellerOrderResolver {
   // tax-invoice auditing and regeneration.
   // ---------------------------------------------------------------------------
 
+  /** Admin fetches any seller-order by id (any seller) for tax-invoice auditing. Auth: invoice:manage permission. */
   @Query(() => SellerOrder, { name: 'adminSellerOrder' })
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('invoice:manage')
@@ -30,6 +31,7 @@ export class SellerOrderResolver {
     return this.sellerOrderService.adminSellerOrder(id);
   }
 
+  /** Admin paginated seller-orders, optionally only PAID ones still missing an invoice. Auth: invoice:manage permission. */
   @Query(() => PaginatedSellerOrders, { name: 'adminSellerOrdersWithInvoices' })
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('invoice:manage')
@@ -46,6 +48,7 @@ export class SellerOrderResolver {
     });
   }
 
+  /** Paginated list of the seller's own sub-orders, optional status filter. Auth: logged-in seller (enforced in service). */
   @Query(() => PaginatedSellerOrders, { name: 'mySellerOrders' })
   mySellerOrders(
     @CurrentUser() user: CurrentUserPayload,
@@ -61,6 +64,7 @@ export class SellerOrderResolver {
     });
   }
 
+  /** Seller sub-order detail by id (ownership-checked). Auth: logged-in seller (enforced in service). */
   @Query(() => SellerOrder, { name: 'mySellerOrder' })
   mySellerOrder(
     @CurrentUser() user: CurrentUserPayload,
@@ -69,11 +73,13 @@ export class SellerOrderResolver {
     return this.sellerOrderService.mySellerOrder(user.userId, id);
   }
 
+  /** Seller dashboard analytics: net/gross earnings, commission, payouts, order pipeline, 12-month series, best-sellers. Auth: logged-in seller (enforced in service). */
   @Query(() => SellerStats, { name: 'mySellerStats' })
   mySellerStats(@CurrentUser() user: CurrentUserPayload) {
     return this.sellerOrderService.getMyStats(user.userId);
   }
 
+  /** Advances a sub-order through its status workflow; SHIPPED requires a tracking number, COD PENDING→CONFIRMED accrues TCS + generates the invoice. Auth: logged-in seller (enforced in service). */
   @Mutation(() => SellerOrder)
   updateSellerOrderStatus(
     @CurrentUser() user: CurrentUserPayload,

@@ -17,7 +17,7 @@
  *   5. Admin configures credentials via the Payment Methods page
  */
 
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { OrderModule } from '../order/order.module';
 import { InvoiceModule } from '../invoice/invoice.module';
@@ -48,7 +48,11 @@ import { PaymentWebhookController } from './payment-webhook.controller';
 import { PaymentReconciliationCron } from './payment-reconciliation.cron';
 
 @Module({
-  imports: [ConfigModule, OrderModule, InvoiceModule, EmailModule],
+  // forwardRef(OrderModule): with P3-02 Returns, the module ring
+  // Payment -> Order -> Courier -> Returns -> Payment forms. Every other edge is
+  // already forwardRef; deferring this one lets Nest instantiate PaymentModule
+  // while OrderModule is mid-construction. Providers inject OrderService normally.
+  imports: [ConfigModule, forwardRef(() => OrderModule), InvoiceModule, EmailModule],
   controllers: [PaymentWebhookController],
   providers: [
     CryptoService,

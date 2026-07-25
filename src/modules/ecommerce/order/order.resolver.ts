@@ -20,6 +20,7 @@ import { PlaceOrderInput } from './dto/place-order.input';
 export class OrderResolver {
   constructor(private readonly orderService: OrderService) {}
 
+  /** Paginated list of the customer's own orders, optional status filter. Auth: logged-in customer. */
   @Query(() => PaginatedOrders, { name: 'myOrders' })
   myOrders(
     @CurrentUser() user: CurrentUserPayload,
@@ -31,6 +32,7 @@ export class OrderResolver {
     return this.orderService.myOrders(user.userId, { status, page, pageSize });
   }
 
+  /** Customer order detail by id (ownership-checked). Auth: logged-in customer. */
   @Query(() => Order, { name: 'myOrder' })
   myOrder(
     @CurrentUser() user: CurrentUserPayload,
@@ -39,6 +41,7 @@ export class OrderResolver {
     return this.orderService.myOrder(user.userId, id);
   }
 
+  /** Places an order from the cart in one transaction; reserves stock across warehouses and empties the cart. Auth: logged-in customer. */
   @Mutation(() => Order)
   placeOrder(
     @CurrentUser() user: CurrentUserPayload,
@@ -47,6 +50,7 @@ export class OrderResolver {
     return this.orderService.placeOrder(user.userId, input);
   }
 
+  /** Customer cancels their own order; only while all sub-orders are still PENDING, releases reserved stock. Auth: logged-in customer. */
   @Mutation(() => Order)
   cancelMyOrder(
     @CurrentUser() user: CurrentUserPayload,

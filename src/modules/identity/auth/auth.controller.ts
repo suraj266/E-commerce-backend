@@ -25,24 +25,28 @@ export class AuthController {
     // SELLER REGISTRATION + EMAIL VERIFICATION
     // -------------------------------------------------------------------------
 
+    /** POST /auth/seller/register — register a seller (email unverified) + issue an email-verification token. Public. */
     @Post('seller/register')
     @HttpCode(201)
     async registerSeller(@Body() input: RegisterSellerDto) {
         return this.authService.registerSeller(input);
     }
 
+    /** POST /auth/customer/register — register a customer (email unverified) + issue an email-verification token. Public. */
     @Post('customer/register')
     @HttpCode(201)
     async registerCustomer(@Body() input: RegisterCustomerDto) {
         return this.authService.registerCustomer(input);
     }
 
+    /** POST /auth/verify-email — mark a user's email verified via a one-time token. Public. */
     @Post('verify-email')
     @HttpCode(200)
     async verifyEmail(@Body() input: VerifyEmailDto) {
         return this.authService.verifyEmail(input);
     }
 
+    /** POST /auth/resend-verification — re-send the verification link; reply never reveals whether the email exists. Public. */
     @Post('resend-verification')
     @HttpCode(200)
     async resendVerification(@Body() input: ResendVerificationDto) {
@@ -53,12 +57,14 @@ export class AuthController {
     // PASSWORD RESET (forgot-password)
     // -------------------------------------------------------------------------
 
+    /** POST /auth/request-password-reset — email a reset link; always succeeds to avoid account enumeration. Public. */
     @Post('request-password-reset')
     @HttpCode(200)
     async requestPasswordReset(@Body() input: RequestPasswordResetDto) {
         return this.authService.requestPasswordReset(input);
     }
 
+    /** POST /auth/reset-password — set a new password via a one-time reset token. Public. */
     @Post('reset-password')
     @HttpCode(200)
     async resetPassword(@Body() input: ResetPasswordDto) {
@@ -78,10 +84,29 @@ export class AuthController {
     // LOGIN / REFRESH / LOGOUT
     // -------------------------------------------------------------------------
 
+    /** POST /auth/login — email+password login; merges any guest cart and sets the refresh-token httpOnly cookie. Public. */
     @Post('login')
     @HttpCode(200)
-    async login(@Body() loginUserInput: LoginUserDto, @Res({ passthrough: true }) res: Response) {
+    async login(@Body() loginUserInput: LoginUserDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+        // Merge any anonymous guest cart into the customer on login. The token
+        // lives in an httpOnly cookie (JS can't read it), so the controller
+        // reads it here and hands it to the (soft-fail) merge inside login.
+        const guestCartToken = req.cookies?.guestCartToken;
+        if (guestCartToken) {
+            loginUserInput.guestCartToken = guestCartToken;
+        }
+
         const result = await this.authService.login(loginUserInput);
+
+        // Guest cart has been folded in (best-effort) — retire the cookie so the
+        // now-empty guest cart token isn't reused. Path/domain must match how it
+        // was set (see GuestCartResolver).
+        if (guestCartToken) {
+            res.clearCookie('guestCartToken', {
+                path: '/',
+                domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined,
+            });
+        }
 
         // Set refresh token in HTTP-only cookie
         res.cookie('refreshToken', result.refreshToken, {
@@ -115,6 +140,7 @@ export class AuthController {
         return this.authService.getSession(refreshToken);
     }
 
+    /** POST /auth/refresh — rotate tokens from the refreshToken cookie and set a fresh httpOnly cookie. Public (cookie-authenticated). */
     @Post('refresh')
     @HttpCode(200)
     async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
@@ -138,6 +164,7 @@ export class AuthController {
         return { accessToken: result.accessToken };
     }
 
+    /** POST /auth/logout — revoke the refresh token and clear its cookie. Auth: logged-in user. */
     @Post('logout')
     @HttpCode(200)
     @UseGuards(JwtAuthGuard)

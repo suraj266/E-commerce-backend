@@ -1,0 +1,174 @@
+/// =============================================================================
+/// Returns / RMA lifecycle (Phase 3, P3-02).
+/// =============================================================================
+///
+/// A ReturnRequest is a customer-initiated return against ONE delivered
+/// SellerOrder. It drives a guarded state machine:
+///
+///   REQUESTED → APPROVED → PICKUP_SCHEDULED → IN_TRANSIT → RECEIVED
+///             → QC_PASSED → REFUNDED → CLOSED                     (REFUND arm)
+///             → QC_PASSED → REPLACEMENT_APPROVED → REPLACEMENT_SHIPPED → CLOSED
+///                                                                 (REPLACEMENT arm; NO refund)
+///   REQUESTED → REJECTED                         (seller declines up front)
+///   RECEIVED  → QC_FAILED → REJECTED/CLOSED       (item failed inspection; no refund)
+///
+/// resolutionType forks the machine at QC_PASSED: a REFUND return fans out to
+/// the money path below; a REPLACEMENT return records the intent + notifies the
+/// seller to ship a swap unit and NEVER touches refund/clawback/TCS.
+///
+/// Money coupling (see returns.service.ts):
+///   • APPROVED schedules a Shiprocket REVERSE pickup (new reverse AWB) — all
+///     external courier HTTP happens OUTSIDE any DB transaction.
+///   • QC_PASSED fans out, idempotently, to: (a) the EXISTING Phase-2
+///     RefundService (guarded exactly-once refund + restock — never duplicated),
+///     (b) a PayoutAdjustment commission CLAWBACK that nets out of the seller's
+///     NEXT payout (payout.prisma), (c) TcsService.reverse() for the returned
+///     slice (cumulative-clamped — reuses the existing §52 reversal).
+///
+/// Idempotency + integrity (Prisma cannot model these — they live in the
+/// hand-authored migration.sql, documented here):
+///   • CHECK "return_item_qty_positive": ReturnItem.quantity > 0.
+///   • Partial UNIQUE "PayoutAdjustment_return_clawback_unique" (payout.prisma)
+///     → at most one clawback per return.
+///
+/// No Prisma relations are declared to Order/SellerOrder/Customer/Seller/Store/
+/// Refund on purpose (those models live in other schema files and a relation
+/// needs a back-reference on BOTH sides). These are plain scalar FK columns
+/// (indexed) — the same convention TcsLedger uses. The parent↔child links to
+/// ReturnItem/ReturnEvent, which live in THIS file, are real relations.
+
+enum ReturnStatus {
+  REQUESTED            /// Customer opened the return; awaiting seller review.
+  APPROVED             /// Seller approved; a reverse pickup is being arranged.
+  PICKUP_SCHEDULED     /// Reverse AWB generated with the courier.
+  IN_TRANSIT           /// Reverse shipment picked up / moving back to the seller.
+  RECEIVED             /// Parcel back with the seller; awaiting QC.
+  QC_PASSED            /// Passed inspection → forks on resolutionType (refund vs replacement).
+  QC_FAILED            /// Failed inspection → no refund.
+  REFUNDED             /// (REFUND arm) Buyer refund processed + clawback + TCS reversal booked.
+  REPLACEMENT_APPROVED /// (REPLACEMENT arm) QC passed; seller notified to ship the swap unit. NO refund.
+  REPLACEMENT_SHIPPED  /// (REPLACEMENT arm) Seller shipped the replacement (reference recorded).
+  CLOSED               /// Terminal success (refunded/replaced + settled).
+  REJECTED             /// Terminal decline (up-front or post-QC-fail); no refund.
+}
+
+/// v1 scopes REFUND only. REPLACEMENT is modelled but gated behind
+/// RETURNS_ALLOW_REPLACEMENT (returns.constants.ts) — the service rejects it
+/// until a replacement pipeline exists. // NEEDS PRODUCT SIGN-OFF.
+enum ReturnResolutionType {
+  REFUND
+  REPLACEMENT
+}
+
+model ReturnRequest {
+  id           String @id @default(uuid())
+  /// Human-readable RMA number: RMA-YYYY-MM-XXXXXXX.
+  returnNumber String @unique
+
+  /// Denormalised owner keys (scalar FKs — see header note). One return is
+  /// always scoped to a single SellerOrder within the parent Order.
+  orderId       String
+  sellerOrderId String
+  sellerId      String
+  storeId       String
+  customerId    String
+
+  status         ReturnStatus         @default(REQUESTED)
+  resolutionType ReturnResolutionType @default(REFUND)
+
+  /// Customer's reason code / free text + the seller's QC + decline notes.
+  reason          String
+  customerNote    String?
+  qcNote          String?
+  rejectionReason String?
+
+  /// Reverse-pickup courier linkage (populated at APPROVED). The reverse AWB is
+  /// how the courier webhook correlates a scan back to THIS return.
+  reverseAwb             String?
+  reverseShipmentId      String?
+  reverseProviderOrderId String?
+  reverseLabelUrl        String?
+  /// Which provider generated the reverse shipment (e.g. 'SHIPROCKET' | 'MOCK').
+  reverseProvider        String? @db.VarChar(20)
+
+  /// Money linkage (populated at QC_PASSED → REFUNDED for the REFUND arm).
+  /// refundId points at the Refund row the EXISTING RefundService created — the
+  /// single source of truth for the buyer refund + restock. NULL for the
+  /// REPLACEMENT arm (a replacement NEVER refunds).
+  refundId     String?
+  refundAmount Decimal? @db.Decimal(10, 2)
+
+  /// Replacement linkage (REPLACEMENT arm only). A full reshipment SellerOrder
+  /// is out of scope in v1 — instead the seller's own outbound tracking/AWB (or
+  /// a free-text note) for the swap unit is recorded here for the customer, and
+  /// the two timestamps back the REPLACEMENT_APPROVED / REPLACEMENT_SHIPPED
+  /// transitions alongside ReturnEvent.
+  replacementReference  String?
+  replacementApprovedAt DateTime?
+  replacementShippedAt  DateTime?
+
+  /// Per-transition timestamps (the audit backbone alongside ReturnEvent).
+  requestedAt       DateTime  @default(now())
+  approvedAt        DateTime?
+  pickupScheduledAt DateTime?
+  inTransitAt       DateTime?
+  receivedAt        DateTime?
+  qcPassedAt        DateTime?
+  qcFailedAt        DateTime?
+  refundedAt        DateTime?
+  closedAt          DateTime?
+  rejectedAt        DateTime?
+
+  /// Seller user who approved / QC'd (accountability).
+  approvedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items  ReturnItem[]
+  events ReturnEvent[]
+
+  @@index([orderId])
+  @@index([sellerOrderId])
+  @@index([sellerId, status])
+  @@index([customerId])
+  @@index([status])
+  @@index([reverseAwb])
+}
+
+/// One line of a return — a slice of an OrderItem, quantity-bounded to what was
+/// purchased (enforced in returns.service.ts). CHECK quantity > 0 in migration.
+model ReturnItem {
+  id              String  @id @default(uuid())
+  returnRequestId String
+  /// Scalar FK to OrderItem (no back-relation — see header note).
+  orderItemId     String
+  quantity        Int
+  /// Free-text condition captured at QC (e.g. 'sealed', 'used', 'damaged').
+  condition       String?
+
+  createdAt DateTime @default(now())
+
+  returnRequest ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([returnRequestId])
+  @@index([orderItemId])
+}
+
+/// Append-only transition trail (OrderStatusHistory-style, but over ReturnStatus
+/// which OrderStatusHistory's OrderStatus enum can't represent).
+model ReturnEvent {
+  id              String        @id @default(uuid())
+  returnRequestId String
+  fromStatus      ReturnStatus?
+  toStatus        ReturnStatus
+  note            String?
+  /// User who triggered the transition; null = system (courier webhook / cron).
+  actorUserId     String?
+
+  createdAt DateTime @default(now())
+
+  returnRequest ReturnRequest @relation(fields: [returnRequestId], references: [id], onDelete: Cascade)
+
+  @@index([returnRequestId, createdAt])
+}

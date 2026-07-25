@@ -77,8 +77,12 @@ export class Cart {
   @Field(() => ID)
   id: string;
 
-  @Field(() => ID)
-  customerId: string;
+  @Field(() => ID, {
+    nullable: true,
+    description:
+      'Owning customer. Null for a guest cart (keyed by an httpOnly sessionToken cookie instead).',
+  })
+  customerId?: string | null;
 
   @Field(() => Date)
   createdAt: Date;

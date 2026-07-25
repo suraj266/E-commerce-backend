@@ -22,6 +22,7 @@ export class SliderResolver {
   // Public — storefront fetches by stable key
   // ---------------------------------------------------------------------------
 
+  /** Public storefront slider by key; only PUBLISHED sliders with enabled items. Public. */
   @Query(() => Slider, { name: 'publicSlider' })
   publicSlider(@Args('key', { type: () => String }) key: string) {
     return this.sliderService.findPublicByKey(key);
@@ -31,6 +32,7 @@ export class SliderResolver {
   // Admin
   // ---------------------------------------------------------------------------
 
+  /** Admin list of all sliders with their items. Auth: slider:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:read')
   @Query(() => [Slider], { name: 'adminSliders' })
@@ -38,6 +40,7 @@ export class SliderResolver {
     return this.sliderService.findAllAdmin();
   }
 
+  /** Paginated admin slider list (filter by status/search). Auth: slider:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:read')
   @Query(() => PaginatedSliders, { name: 'adminSlidersPaginated' })
@@ -56,6 +59,7 @@ export class SliderResolver {
     });
   }
 
+  /** Admin fetch of one slider by id with its items. Auth: slider:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:read')
   @Query(() => Slider, { name: 'adminSlider' })
@@ -63,6 +67,7 @@ export class SliderResolver {
     return this.sliderService.findOneAdmin(id);
   }
 
+  /** Create a slider; auto-generates a unique key from the name when none given. Auth: slider:create. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:create')
   @Mutation(() => Slider)
@@ -70,6 +75,7 @@ export class SliderResolver {
     return this.sliderService.create(input);
   }
 
+  /** Update a slider's name/key/config (key uniqueness enforced). Auth: slider:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:update')
   @Mutation(() => Slider)
@@ -77,6 +83,7 @@ export class SliderResolver {
     return this.sliderService.update(input);
   }
 
+  /** Change a slider's publish status. Auth: slider:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:update')
   @Mutation(() => Slider)
@@ -86,6 +93,7 @@ export class SliderResolver {
     return this.sliderService.setStatus(input);
   }
 
+  /** Soft-delete a slider (archives it). Auth: slider:delete. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:delete')
   @Mutation(() => Slider)
@@ -97,6 +105,7 @@ export class SliderResolver {
   // Slide item mutations
   // ---------------------------------------------------------------------------
 
+  /** Add a slide to a slider; appends at the end when no order is given. Auth: slider:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:update')
   @Mutation(() => SlideItem)
@@ -104,6 +113,7 @@ export class SliderResolver {
     return this.sliderService.addItem(input);
   }
 
+  /** Update a single slide's fields. Auth: slider:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:update')
   @Mutation(() => SlideItem)
@@ -113,6 +123,7 @@ export class SliderResolver {
     return this.sliderService.updateItem(input);
   }
 
+  /** Soft-delete a slide (also disables it). Auth: slider:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:update')
   @Mutation(() => SlideItem)
@@ -120,6 +131,7 @@ export class SliderResolver {
     return this.sliderService.removeItem(id);
   }
 
+  /** Atomically reorder a slider's slides by id list; all ids must belong to it. Auth: slider:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('slider:update')
   @Mutation(() => Boolean)

@@ -122,6 +122,22 @@ const permissions = [
     { module: "review", action: "moderate", description: "Approve or reject pending reviews" },
     // Admin Dashboard
     { module: "dashboard", action: "read", description: "Read admin dashboard metrics (revenue, orders, users, sellers, recent orders)" },
+    // Security Audit Log (Phase 3 P3-05 — append-only trail over money-movers)
+    { module: "audit", action: "read", description: "Read the append-only security audit log" },
+    // TCS §52 marketplace tax (Phase 3 P3-03 — ledger, deposits, GSTR exports)
+    { module: "tcs", action: "read", description: "Read TCS ledger, period summaries, GSTR-8/GSTR-1 exports" },
+    { module: "tcs", action: "manage", description: "Refresh TCS deposits and mark them deposited (challan ref)" },
+    // Returns / RMA (Phase 3 P3-02 — admin oversight of the return lifecycle)
+    { module: "return", action: "read", description: "Read return requests across sellers (admin oversight)" },
+    { module: "return", action: "manage", description: "Act on return requests (admin override)" },
+    // Admin order console (Phase 3 Wave 4 — cross-seller orders)
+    { module: "order", action: "read", description: "Read orders across sellers (admin console)" },
+    { module: "order", action: "manage", description: "Admin order actions (cancel unpaid orders)" },
+    // Programmatic API keys (Phase 3 Wave 4)
+    { module: "apikey", action: "read", description: "List programmatic API keys" },
+    { module: "apikey", action: "manage", description: "Create and revoke programmatic API keys" },
+    // Newsletter broadcast (Phase 3 Wave 4 — consent-gated marketing send)
+    { module: "newsletter", action: "send", description: "Compose and send newsletter broadcast campaigns" },
     // Invoices (Phase 1 — admin can force-regenerate a tax invoice PDF)
     { module: "invoice", action: "manage", description: "Regenerate seller-order tax invoices (admin override)" },
     // Labels (product badges — manual + auto/rule-based)

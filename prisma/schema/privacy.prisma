@@ -1,0 +1,155 @@
+/// =============================================================================
+/// DPDP Act 2023 — data-subject rights (Phase 3, P3-07).
+/// =============================================================================
+///
+/// India's Digital Personal Data Protection Act 2023 grants a data principal
+/// (our customer) three operative rights this module implements:
+///
+///   1. Right to erasure  -> AccountDeletionRequest. We CANNOT hard-delete a
+///      user whose orders/payments/invoices/TCS ledger rows are under the 7-year
+///      GST retention mandate, so "erasure" is satisfied by ANONYMIZATION: after
+///      a cooling-off grace window we scrub the User + UserAddress PII to
+///      tombstones, sever login, revoke sessions/tokens, and unsubscribe
+///      marketing — while KEEPING every Order/Payment/Invoice/TcsLedger row and
+///      the immutable invoice PDFs (which carry the legally-required buyer
+///      snapshot). See privacy.service.anonymizeUser.
+///      👤 NEEDS LEGAL SIGN-OFF: that anonymization-not-deletion satisfies the
+///         erasure right, and the exact retention carve-out list.
+///
+///   2. Right to data portability -> DataExportRequest. An outbox job assembles
+///      the principal's data into a bundle, uploads it, and emails a signed,
+///      time-limited download URL.
+///
+///   3. Consent -> ConsentRecord (append-only). Every marketing send is gated by
+///      privacy.service.canMarket(), which reads the LATEST consent state and
+///      FAILS CLOSED (no record => not marketable).
+///
+/// None of these three models carry a Prisma relation to `User`: userId is an
+/// unlinked reference on purpose. It keeps this compliance surface decoupled
+/// from the identity schema (no back-relation edit required on User) and means
+/// the audit trail of consent / export / deletion survives verbatim even after
+/// the referenced user row is anonymized.
+
+/// -----------------------------------------------------------------------------
+/// ConsentRecord — append-only consent ledger.
+/// -----------------------------------------------------------------------------
+/// One immutable row per consent decision. We NEVER update or delete a row; a
+/// change of mind is a NEW row, and the current state is "the latest row for
+/// (userId, purpose)". This preserves a defensible audit trail of exactly what
+/// the principal agreed to and when (DPDP demands demonstrable consent).
+///
+/// ⚠️ APPEND-ONLY IS ENFORCED IN THE DATABASE, not just here: the migration
+/// `20260718121000_dpdp_privacy` installs a BEFORE UPDATE OR DELETE trigger
+/// (`consent_record_append_only`) that RAISEs an exception on any UPDATE/DELETE.
+/// Prisma cannot model triggers, so that guard lives ONLY in the migration SQL.
+/// Do not add an update/delete code path for this model.
+model ConsentRecord {
+  id      String         @id @default(uuid())
+  /// Unlinked reference to User.id (see file header — no FK by design).
+  userId  String
+  /// What the consent is FOR. 👤 NEEDS LEGAL SIGN-OFF: the consent taxonomy
+  /// (which purposes we track) + whether existing customers must re-consent.
+  purpose ConsentPurpose
+  /// true = granted, false = withdrawn. The latest row wins.
+  granted Boolean
+  /// Where the decision was captured, e.g. "signup", "account_privacy_page",
+  /// "checkout". Free-form so new capture points don't need a migration.
+  source  String
+
+  createdAt DateTime @default(now())
+
+  /// canMarket() reads the newest row for a (userId, purpose) — this index
+  /// keeps that "latest state" lookup cheap.
+  @@index([userId, purpose, createdAt])
+}
+
+/// The consent taxonomy. 👤 NEEDS LEGAL SIGN-OFF — the set of purposes and their
+/// legal basis must be reviewed before launch. MARKETING_EMAIL is the only
+/// purpose wired into a live gate (canMarket) in v1; the rest are declared so
+/// the ledger can record them without a schema change.
+enum ConsentPurpose {
+  MARKETING_EMAIL
+  MARKETING_SMS
+  PROFILING_PERSONALIZATION
+  THIRD_PARTY_SHARING
+}
+
+/// -----------------------------------------------------------------------------
+/// DataExportRequest — right to data portability.
+/// -----------------------------------------------------------------------------
+/// A principal asks for a copy of their data. The outbox worker
+/// (privacy.service.buildAndSendDataExport) assembles a JSON bundle, stores it,
+/// and emails a signed URL that expires after EXPORT_URL_TTL_HOURS. `fileUrl`
+/// and `expiresAt` are set when the bundle is READY.
+model DataExportRequest {
+  id     String            @id @default(uuid())
+  /// Unlinked reference to User.id (see file header).
+  userId String
+  status DataExportStatus  @default(PENDING)
+
+  /// Signed, time-limited download URL. Null until READY.
+  fileUrl   String?
+  /// When `fileUrl` stops working (signed-URL expiry). 👤 NEEDS LEGAL SIGN-OFF
+  /// on the retention TTL of the generated export bundle.
+  expiresAt DateTime?
+
+  requestedAt DateTime  @default(now())
+  /// When the bundle finished building (status -> READY / FAILED).
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+enum DataExportStatus {
+  PENDING     /// Requested, outbox job enqueued, not yet built.
+  PROCESSING  /// Worker is assembling + uploading the bundle.
+  READY       /// Bundle uploaded; `fileUrl` valid until `expiresAt`.
+  EXPIRED     /// Signed URL lapsed; principal must request a fresh export.
+  FAILED      /// Assembly/upload failed after outbox retries were exhausted.
+}
+
+/// -----------------------------------------------------------------------------
+/// AccountDeletionRequest — right to erasure (via anonymization).
+/// -----------------------------------------------------------------------------
+/// A principal asks to delete their account. We do NOT anonymize immediately:
+/// `executeAfter` = requestedAt + DELETION_GRACE_DAYS gives a cooling-off window
+/// during which the principal can cancel (mistake / account-takeover recovery).
+/// A cron (privacy-erasure.cron) finds GRACE rows whose `executeAfter` has
+/// passed and runs the irreversible scrub, then stamps `anonymizedAt` + status
+/// ANONYMIZED.
+model AccountDeletionRequest {
+  id     String                @id @default(uuid())
+  /// Unlinked reference to User.id (see file header).
+  userId String
+  status AccountDeletionStatus @default(GRACE)
+
+  requestedAt DateTime @default(now())
+  /// Earliest time the anonymization cron may run for this request
+  /// (requestedAt + DELETION_GRACE_DAYS). 👤 NEEDS LEGAL SIGN-OFF on the window.
+  executeAfter DateTime
+
+  /// Set once the irreversible scrub completed.
+  anonymizedAt DateTime?
+  /// Set if the principal cancelled during the grace window.
+  cancelledAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The cron claim scan: WHERE status = 'GRACE' AND "executeAfter" <= now().
+  @@index([status, executeAfter])
+  @@index([userId, createdAt])
+}
+
+enum AccountDeletionStatus {
+  PENDING     /// Reserved for a future email-confirmation step before the grace
+              /// clock starts. Not used by the v1 happy path (requests open in
+              /// GRACE). Kept so adding double-opt-in later needs no migration.
+  GRACE       /// Cooling-off window active; principal may still cancel.
+  ANONYMIZED  /// Scrub executed (terminal, irreversible).
+  CANCELLED   /// Principal cancelled during the grace window (terminal).
+}

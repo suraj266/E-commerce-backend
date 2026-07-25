@@ -16,6 +16,7 @@ export class TaxResolver {
   // Public — seller product form fetches active taxes for the radio group
   // ---------------------------------------------------------------------------
 
+  /** Active tax rates for the seller product form's radio group. Public. */
   @Query(() => [Tax], { name: 'taxes' })
   taxes() {
     return this.taxService.findAllActive();
@@ -25,6 +26,7 @@ export class TaxResolver {
   // Admin — full list (incl. inactive) + paginated
   // ---------------------------------------------------------------------------
 
+  /** Full tax list including inactive rows (admin table). Auth: tax:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('tax:read')
   @Query(() => [Tax], { name: 'adminTaxes' })
@@ -32,6 +34,7 @@ export class TaxResolver {
     return this.taxService.findAllAdmin();
   }
 
+  /** Paginated + searchable tax feed for the admin table. Auth: tax:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('tax:read')
   @Query(() => PaginatedTaxes, { name: 'adminTaxesPaginated' })
@@ -43,6 +46,7 @@ export class TaxResolver {
     return this.taxService.findAllPaginated({ page, pageSize, search });
   }
 
+  /** Fetches a single tax rate by id. Auth: tax:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('tax:read')
   @Query(() => Tax, { name: 'tax' })
@@ -50,6 +54,7 @@ export class TaxResolver {
     return this.taxService.findOne(id);
   }
 
+  /** Creates a tax rate; revives a same-name soft-deleted row instead of erroring. Auth: tax:create permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('tax:create')
   @Mutation(() => Tax)
@@ -57,6 +62,7 @@ export class TaxResolver {
     return this.taxService.create(input);
   }
 
+  /** Updates a tax rate's fields (name uniqueness enforced). Auth: tax:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('tax:update')
   @Mutation(() => Tax)
@@ -64,6 +70,7 @@ export class TaxResolver {
     return this.taxService.update(input);
   }
 
+  /** Soft-deletes a tax rate (sets deletedAt + isActive=false). Auth: tax:delete permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('tax:delete')
   @Mutation(() => Tax)

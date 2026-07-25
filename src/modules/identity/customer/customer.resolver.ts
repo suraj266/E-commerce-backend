@@ -23,6 +23,7 @@ export class CustomerResolver {
   // Admin list + detail
   // ---------------------------------------------------------------------------
 
+  /** Admin lists customers with search/status filters + pagination. Auth: customer:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('customer:read')
   @Query(() => PaginatedAdminCustomers, { name: 'adminCustomers' })
@@ -43,6 +44,7 @@ export class CustomerResolver {
     });
   }
 
+  /** Admin fetches one customer's full profile by id. Auth: customer:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('customer:read')
   @Query(() => AdminCustomer, { name: 'adminCustomer' })
@@ -54,6 +56,7 @@ export class CustomerResolver {
   // Admin mutations
   // ---------------------------------------------------------------------------
 
+  /** Admin edits a customer (name/phone/status on User; marketing/currency on Customer). Auth: customer:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('customer:update')
   @Mutation(() => AdminCustomer)
@@ -61,6 +64,7 @@ export class CustomerResolver {
     return this.customerService.update(input);
   }
 
+  /** Admin soft-deletes a customer and forces the User inactive (blocks login). Auth: customer:delete permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('customer:delete')
   @Mutation(() => AdminCustomer)
@@ -68,6 +72,7 @@ export class CustomerResolver {
     return this.customerService.softDelete(id);
   }
 
+  /** Admin restores a soft-deleted customer and reactivates the User. Auth: customer:delete permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('customer:delete')
   @Mutation(() => AdminCustomer)
@@ -79,12 +84,14 @@ export class CustomerResolver {
   // Customer self-serve
   // ---------------------------------------------------------------------------
 
+  /** Customer reads their own profile; customer accounts only. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Query(() => AdminCustomer, { name: 'myProfile' })
   myProfile(@CurrentUser() user: CurrentUserPayload) {
     return this.customerService.myProfile(user.userId);
   }
 
+  /** Customer updates their own name/phone/marketing/currency; email & status not settable here. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => AdminCustomer)
   updateMyProfile(

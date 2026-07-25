@@ -29,7 +29,19 @@ model Payout {
   grossAmount Decimal @db.Decimal(10, 2) @default(0)
   /// Total PROCESSED-refund amount subtracted from the gross.
   refundAdjustment Decimal @db.Decimal(10, 2) @default(0)
-  /// grossAmount − refundAdjustment. The amount actually transferred.
+  /// TCS §52 withheld from the seller at settlement (P3-03): the net
+  /// accrued-minus-reversed TCS for this run's seller orders. The operator
+  /// deducts it here and deposits it to the government (GSTR-8), so it never
+  /// reaches the seller. // NEEDS CA SIGN-OFF — that TCS is withheld at payout.
+  /// Raw-SQL CHECK "payout_tcs_nonneg" (>= 0) lives in the hand-authored migration.
+  tcsAdjustment Decimal @db.Decimal(10, 2) @default(0)
+  /// Return-driven commission CLAWBACK absorbed by this run (P3-02): the sum of
+  /// PENDING PayoutAdjustment magnitudes greedily netted out of this payout.
+  /// Carried forward (stays PENDING) when a run can't absorb it — the seller is
+  /// never paid a negative. // NEEDS FINANCE SIGN-OFF — clawback basis + carry.
+  /// Raw-SQL CHECK "payout_clawback_nonneg" (>= 0) lives in the hand-authored migration.
+  clawbackAdjustment Decimal @db.Decimal(10, 2) @default(0)
+  /// grossAmount − refundAdjustment − tcsAdjustment − clawbackAdjustment. The amount actually transferred.
   netAmount Decimal @db.Decimal(10, 2) @default(0)
   currencyCode String @default("INR")
 
@@ -59,9 +71,75 @@ model Payout {
 
   seller Seller       @relation(fields: [sellerId], references: [id], onDelete: Restrict)
   items  PayoutItem[]
+  /// Return-driven clawbacks (P3-02) absorbed by this run (SetNull-linked so a
+  /// carried-forward adjustment survives a run being deleted/failed).
+  adjustments PayoutAdjustment[]
 
   @@index([sellerId])
   @@index([status])
+}
+
+/// =============================================================================
+/// PayoutAdjustment — carry-forward seller-payout ledger delta (Phase 3, P3-02).
+/// =============================================================================
+///
+/// A return that reaches QC_PASSED refunds the buyer even when the seller order
+/// was ALREADY settled — so the platform must recover the commission/settled
+/// amount from the seller. Instead of the Phase-2 hard-block ("cannot refund a
+/// paid-out order"), a return writes a PENDING clawback here; PayoutService nets
+/// it out of the seller's NEXT payout, greedily and in full-adjustment units,
+/// carrying any unabsorbed clawback forward. A seller is NEVER paid a negative.
+///
+/// `amount` is a POSITIVE magnitude to DEDUCT (the sign is applied in code).
+/// Idempotency: partial UNIQUE "PayoutAdjustment_return_clawback_unique" on
+/// (returnId) WHERE kind='RETURN_CLAWBACK' (hand-authored migration) → a retried
+/// QC_PASSED writes at most one clawback per return (createMany skipDuplicates).
+///
+/// CHECK "payout_adjustment_amount_nonneg" (amount >= 0) lives in the migration.
+///
+/// // NEEDS FINANCE SIGN-OFF — the clawback basis (seller payout amount vs
+/// // commission-only vs proportional-to-returned-lines) and carry-forward rule.
+
+enum PayoutAdjustmentKind {
+  /// Commission/settlement clawback for a QC-passed return (v1).
+  RETURN_CLAWBACK
+}
+
+enum PayoutAdjustmentStatus {
+  PENDING /// Not yet absorbed by a payout run (carried forward each run).
+  APPLIED /// Fully netted out of `payoutId`.
+  VOID    /// Reversed by finance (unused by the automated flow).
+}
+
+model PayoutAdjustment {
+  id       String @id @default(uuid())
+  sellerId String
+
+  /// Origin linkage (scalar FKs — the return/refund models live elsewhere).
+  sellerOrderId String?
+  returnId      String?
+  refundId      String?
+
+  kind   PayoutAdjustmentKind   @default(RETURN_CLAWBACK)
+  status PayoutAdjustmentStatus @default(PENDING)
+
+  /// Positive magnitude to deduct from the seller's next payable.
+  amount      Decimal @db.Decimal(10, 2)
+  description String?
+
+  /// Set when a payout run absorbs it.
+  payoutId    String?
+  createdById String?
+  appliedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payout Payout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+
+  @@index([sellerId, status])
+  @@index([returnId])
+  @@index([payoutId])
 }
 
 model PayoutItem {
@@ -74,6 +152,10 @@ model PayoutItem {
   amount Decimal @db.Decimal(10, 2)
   /// PROCESSED-refund amount attributed to this seller order at run time.
   refundedAmount Decimal @db.Decimal(10, 2) @default(0)
+  /// Net accrued-minus-reversed TCS §52 withheld for this seller order (P3-03).
+  /// Rolls up into Payout.tcsAdjustment. Raw-SQL CHECK "payout_item_tcs_nonneg"
+  /// (>= 0) lives in the hand-authored migration.
+  tcsDeducted Decimal @db.Decimal(10, 2) @default(0)
 
   createdAt DateTime @default(now())
 

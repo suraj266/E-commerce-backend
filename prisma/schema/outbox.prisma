@@ -1,0 +1,67 @@
+/// =============================================================================
+/// OutboxEvent — durable transactional outbox (Phase 3, P3-01).
+/// =============================================================================
+///
+/// The keystone of Phase 3 reliability. Previously, side effects fired AFTER a
+/// business transaction committed — as fire-and-forget `.catch()` promises
+/// (invoice generation, cart clear, placement/refund/KYC emails). A crash
+/// between commit and the side effect silently dropped it.
+///
+/// An OutboxEvent row is written INSIDE the same `$transaction` as the business
+/// write (via `OutboxService.enqueue(tx, …)`), so the intent to perform the
+/// side effect commits atomically with the state that caused it. A relay poller
+/// (`OutboxRelayService`, `@Cron` + `FOR UPDATE SKIP LOCKED`) then hands each
+/// row to a named BullMQ queue whose `WorkerHost` processor performs the effect
+/// and marks the row DONE. On failure the row is retried with exponential
+/// backoff (`attempts`/`nextRunAt`) up to `maxAttempts`, then parked FAILED and
+/// reported to Sentry.
+///
+/// `dedupeKey @unique` makes enqueue idempotent for a logical event (e.g.
+/// `invoice:<sellerOrderId>`): a second enqueue with the same key is skipped
+/// (createMany + skipDuplicates) rather than producing a duplicate side effect.
+model OutboxEvent {
+  id      String       @id @default(uuid())
+  /// Dot-namespaced handler key, e.g. `invoice.generate`, `email.order_placed`.
+  type    String
+  /// Handler input — minimal reference data (usually just ids). The worker
+  /// re-reads current state at process time (canonical outbox pattern).
+  payload Json
+  status  OutboxStatus @default(PENDING)
+
+  /// Delivery attempts so far (incremented on each failed run).
+  attempts    Int @default(0)
+  /// After this many failed attempts the row is parked FAILED + Sentry-reported.
+  maxAttempts Int @default(8)
+
+  /// Earliest time the relay may (re)dispatch this row. Advanced on each retry
+  /// by the exponential-backoff schedule (reuses the with-resilience math).
+  nextRunAt DateTime @default(now())
+
+  /// Optional idempotency key — a second enqueue with the same key is skipped.
+  dedupeKey String? @unique
+
+  /// Last failure message (truncated) for debugging a FAILED / retrying row.
+  lastError String?
+
+  /// Correlation id captured at enqueue time so the async side effect's logs +
+  /// Sentry events line up with the originating request trace.
+  correlationId String?
+
+  /// Named BullMQ queue this row is dispatched to (invoices/emails/courier/cart).
+  queue String
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  processedAt DateTime?
+
+  /// The relay claims a batch with `WHERE status = PENDING AND nextRunAt <= now()`
+  /// ordered by nextRunAt — this composite index keeps that scan cheap.
+  @@index([status, nextRunAt])
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}

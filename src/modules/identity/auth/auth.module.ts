@@ -6,6 +6,7 @@ import { JwtStrategy } from './passport_strategy/jwt.strategy';
 import { config } from '@/common/config/config';
 import { AuthController } from './auth.controller';
 import { EmailModule } from '@/modules/admin/email/email.module';
+import { CartModule } from '@/modules/ecommerce/cart/cart.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { EmailModule } from '@/modules/admin/email/email.module';
       },
     }),
     EmailModule,
+    CartModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

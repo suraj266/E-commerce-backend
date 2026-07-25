@@ -36,6 +36,10 @@ import { VerifyPaymentInput } from './dto/verify-payment.input';
 import { InvoiceService } from '../invoice/invoice.service';
 import { paidAmountMatches, expectedPaise } from './payment-amount.util';
 import { RefundService } from './refund.service';
+import { OutboxService } from '@/modules/outbox/outbox.service';
+import { OUTBOX_EVENT, OUTBOX_QUEUE } from '@/modules/outbox/outbox.constants';
+import { TcsService } from '@/modules/compliance/tcs/tcs.service';
+import { MetricsService } from '@/modules/observability/metrics/metrics.service';
 
 /**
  * Thrown when a webhook fails signature verification. The controller maps this
@@ -65,95 +69,89 @@ export class PaymentService {
     private readonly gatewayMap: Map<string, IPaymentGateway>,
     private readonly invoice: InvoiceService,
     private readonly refundService: RefundService,
+    private readonly outbox: OutboxService,
+    // Optional trailing param so the positional unit tests that construct
+    // PaymentService keep compiling; the running app always injects it
+    // (TcsModule is @Global). TCS accrual is a compliance side effect committed
+    // inside the same capture transaction as the invoice — guarded with `?.`.
+    // See P3-03.
+    private readonly tcs?: TcsService,
+    // Optional trailing param (MetricsModule is @Global). Business counters are
+    // fire-and-forget side effects guarded with `?.` — a metrics hiccup can
+    // never fail a checkout. See P3-04 WIRE-METRICS.
+    private readonly metrics?: MetricsService,
   ) {}
 
   /**
-   * Empties the buyer's cart after a PREPAID payment is captured. Prepaid
-   * orders intentionally keep the cart until payment succeeds (so a cancelled
-   * payment leaves it intact for retry — see order-placement step f), so we
-   * clear it here. Fire-and-forget; a missed clear is a tolerable degradation.
-   */
-  private clearCartForOrder(orderId: string): void {
-    this.prisma.order
-      .findUnique({ where: { id: orderId }, select: { customerId: true } })
-      .then((order) => {
-        if (!order) return;
-        return this.prisma.cart
-          .findUnique({
-            where: { customerId: order.customerId },
-            select: { id: true },
-          })
-          .then((cart) => {
-            if (!cart) return;
-            return this.prisma.cartItem.deleteMany({
-              where: { cartId: cart.id },
-            });
-          });
-      })
-      .catch((err) =>
-        this.logger.warn(
-          `Cart clear after payment for order ${orderId} failed: ${(err as Error).message}`,
-        ),
-      );
-  }
-
-  /**
-   * Fire-and-forget invoice generation for every SellerOrder under an
-   * Order. Called after a payment captures successfully (verify or
-   * webhook path). Failures are logged but never block the payment ack
-   * — the admin can regenerate via UI if a render fails.
-   */
-  private generateInvoicesForOrder(orderId: string): void {
-    this.prisma.sellerOrder
-      .findMany({ where: { orderId }, select: { id: true } })
-      .then((sellerOrders) => {
-        for (const so of sellerOrders) {
-          this.invoice.generateForSellerOrder(so.id).catch((err) => {
-            this.logger.error(
-              `Invoice generation failed for seller-order ${so.id}: ${(err as Error).message}`,
-            );
-          });
-        }
-      })
-      .catch((err) => {
-        this.logger.error(
-          `Could not list seller orders for ${orderId}: ${(err as Error).message}`,
-        );
-      });
-  }
-
-  /**
    * Single source of truth for "a capture succeeded": mark the Payment CAPTURED
-   * and the Order + SellerOrders PAID in one transaction, then kick off invoice
-   * generation and cart clearing. Shared by the verify path, the webhook path,
-   * and the reconciliation cron so all three behave identically and idempotently
+   * and the Order + SellerOrders PAID, AND enqueue the durable side effects
+   * (per-seller-order tax-invoice generation + cart clear) — all in ONE
+   * transaction. Shared by the verify path, the webhook path, and the
+   * reconciliation cron so all three behave identically and idempotently
    * (callers must guard that the payment is not already CAPTURED before calling).
+   *
+   * Invoice generation + cart clear used to be fire-and-forget promises kicked
+   * off after commit — a crash in between silently dropped them. They are now
+   * OutboxEvents committed atomically with the PAID flip, so they always run
+   * (the relay + workers pick them up). The `dedupeKey`s make a double-finalize
+   * a no-op at the outbox layer.
    */
   private async finalizeCapturedPayment(
     payment: { id: string; orderId: string },
     paymentUpdate: Prisma.PaymentUpdateInput,
   ): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.payment.update({
+    try {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.update({
         where: { id: payment.id },
         data: {
           status: PaymentTransactionStatus.CAPTURED,
           capturedAt: new Date(),
           ...paymentUpdate,
         },
-      }),
-      this.prisma.order.update({
+      });
+      await tx.order.update({
         where: { id: payment.orderId },
         data: { paymentStatus: PaymentStatus.PAID },
-      }),
-      this.prisma.sellerOrder.updateMany({
+      });
+      await tx.sellerOrder.updateMany({
         where: { orderId: payment.orderId },
         data: { paymentStatus: PaymentStatus.PAID },
-      }),
-    ]);
+      });
 
-    this.generateInvoicesForOrder(payment.orderId);
-    this.clearCartForOrder(payment.orderId);
+      // Durable side effects — one invoice job per seller-order + one cart clear.
+      const sellerOrders = await tx.sellerOrder.findMany({
+        where: { orderId: payment.orderId },
+        select: { id: true },
+      });
+      for (const so of sellerOrders) {
+        await this.outbox.enqueue(tx, {
+          type: OUTBOX_EVENT.INVOICE_GENERATE,
+          queue: OUTBOX_QUEUE.INVOICES,
+          payload: { sellerOrderId: so.id },
+          dedupeKey: `invoice:${so.id}`,
+        });
+        // §52 TCS accrual at the SAME commit point as the invoice (P3-03). One
+        // ACCRUAL ledger row per seller-order, written INSIDE this transaction so
+        // it commits atomically with the PAID flip. Idempotent (partial-unique on
+        // the ledger) so a re-finalize via verify/webhook/reconcile is a no-op.
+        await this.tcs?.accrue(tx, so.id);
+      }
+      await this.outbox.enqueue(tx, {
+        type: OUTBOX_EVENT.CART_CLEAR,
+        queue: OUTBOX_QUEUE.CART,
+        payload: { orderId: payment.orderId },
+        dedupeKey: `cart-clear:${payment.orderId}`,
+      });
+    });
+    } catch (err) {
+      // Side-effect-only metric; must never alter capture control flow.
+      this.metrics?.recordPayment('failure', 'prepaid');
+      throw err;
+    }
+    // A prepaid capture committed (verify / webhook / reconcile all route here);
+    // COD is captured at initiateCheckout, never through this path.
+    this.metrics?.recordPayment('success', 'prepaid');
   }
 
   // ---------------------------------------------------------------------------
@@ -175,13 +173,11 @@ export class PaymentService {
       throw new BadRequestException(`Unknown payment gateway: ${gatewayName}`);
     }
 
-    // Load config + decrypt credentials
     const config = await this.configService.getConfigForGateway(gatewayName);
     const credentials =
       await this.configService.getDecryptedCredentials(gatewayName);
     gateway.initialize(credentials);
 
-    // Determine the payment method to record on the order
     const supportedMethods = Array.isArray(config.supportedMethods)
       ? (config.supportedMethods as string[])
       : [];
@@ -190,7 +186,6 @@ export class PaymentService {
         ? PaymentMethod.COD
         : ((supportedMethods[0] as PaymentMethod) ?? PaymentMethod.CARD);
 
-    // Determine payment status based on gateway type
     const isCod = gatewayName === 'COD';
     const paymentStatus: PaymentStatus = isCod
       ? PaymentStatus.PENDING
@@ -215,7 +210,6 @@ export class PaymentService {
       { allowPrepaid: true },
     );
 
-    // Calculate processing fee
     let processingFee = 0;
     if (Number(config.processingFee) > 0) {
       if (config.processingFeeType === 'PERCENTAGE') {
@@ -284,6 +278,10 @@ export class PaymentService {
           ...(isCod ? { capturedAt: new Date() } : {}),
         },
       });
+      // COD is captured the instant the order is placed (the Payment row is
+      // created CAPTURED above) — that's the COD confirm/capture commit point.
+      // A non-COD CREATED session is NOT a capture, so it isn't counted here.
+      if (isCod) this.metrics?.recordPayment('success', 'cod');
     }
 
     return {
@@ -300,7 +298,6 @@ export class PaymentService {
    * Idempotent — safe to call even if the webhook already confirmed it.
    */
   async verifyPayment(userId: string, input: VerifyPaymentInput) {
-    // Verify ownership
     const customerId = await this.getCustomerId(userId);
     const order = await this.prisma.order.findUnique({
       where: { id: input.orderId },
@@ -310,7 +307,6 @@ export class PaymentService {
       throw new ForbiddenException('You do not own this order.');
     }
 
-    // Find the payment record
     const payment = await this.prisma.payment.findFirst({
       where: { orderId: input.orderId },
       orderBy: { createdAt: 'desc' },
@@ -322,7 +318,6 @@ export class PaymentService {
       return order;
     }
 
-    // Load gateway + verify
     const gateway = this.gatewayMap.get(payment.gateway);
     if (!gateway) {
       throw new BadRequestException(`Unknown gateway: ${payment.gateway}`);
@@ -455,6 +450,9 @@ export class PaymentService {
           failedAt: new Date(),
         },
       });
+      // Gateway declined a prepaid capture — record the failed outcome
+      // (side-effect-only, guarded).
+      this.metrics?.recordPayment('failure', 'prepaid');
       // A prepaid order whose payment failed must not linger as a
       // seller-actionable PENDING order. Cancel it (releasing reserved stock)
       // unless it's COD (no upfront payment) or already paid (race). The
@@ -542,11 +540,17 @@ export class PaymentService {
       }
     }
 
-    // Sweep B — PAID seller-orders missing a tax invoice.
+    // Sweep B — PAID seller-orders with no rendered tax invoice PDF yet. Keyed
+    // on `invoiceUrl` (not `invoiceNumber`): since P3-01 split number allocation
+    // from rendering, a seller-order may carry a RESERVED invoiceNumber but a
+    // null invoiceUrl (render/upload failed, or the outbox job exhausted its
+    // retries). generateForSellerOrder is idempotent and reuses the reserved
+    // number, so this backfill covers both "never started" and "reserved but
+    // never rendered".
     const missingInvoice = await this.prisma.sellerOrder.findMany({
       where: {
         paymentStatus: PaymentStatus.PAID,
-        invoiceNumber: null,
+        invoiceUrl: null,
         deletedAt: null,
       },
       select: { id: true },

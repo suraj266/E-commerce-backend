@@ -1,0 +1,131 @@
+/// =============================================================================
+/// TCS §52 ledger — marketplace Tax-Collected-at-Source (Phase 3, P3-03).
+/// =============================================================================
+///
+/// Under CGST §52 an e-commerce OPERATOR must collect TCS on the *net value of
+/// taxable supplies* made THROUGH it by other suppliers (the sellers), and
+/// deposit it to the government. This subsystem ACCRUES / LEDGERS / EXPORTS the
+/// numbers only — the actual GSTR-8 filing + challan deposit stay a MANUAL CA
+/// action (see TcsDeposit.markDeposited + the by-10th reminder cron).
+///
+/// EVERY rate / threshold / base-definition here is provisional and carries a
+/// `// NEEDS CA SIGN-OFF` marker in tcs.constants.ts. Do NOT treat any number in
+/// this file as legally final until a chartered accountant has signed it off
+/// against the live GSTN utility.
+///
+/// -------------------------------------------------------------------------
+/// Idempotency + sign convention (enforced in the hand-written migration.sql —
+/// Prisma cannot model partial unique indexes or CHECK constraints):
+///
+///   • Partial UNIQUE INDEX  "TcsLedger_accrual_unique"
+///        ON ("sellerOrderId") WHERE "kind" = 'ACCRUAL'
+///     → at most ONE accrual row per seller-order. A double-finalize (verify +
+///       webhook + reconcile all calling accrue) is a no-op via
+///       createMany({ skipDuplicates:true }) → ON CONFLICT DO NOTHING.
+///       (A plain `@@unique([sellerOrderId, refundId])` can NOT be used: for an
+///        accrual `refundId` is NULL and Postgres treats NULLs as DISTINCT, so
+///        duplicates would slip through — hence the partial index.)
+///
+///   • Partial UNIQUE INDEX  "TcsLedger_reversal_unique"
+///        ON ("sellerOrderId", "refundId") WHERE "kind" = 'REVERSAL'
+///     → at most ONE reversal row per (seller-order, refund). An accrual and its
+///       reversal are therefore always distinct rows.
+///
+///   • CHECK "tcs_ledger_sign":  ACCRUAL amounts are >= 0, REVERSAL amounts <= 0.
+///   • CHECK "tcs_ledger_refund_shape":  ACCRUAL ⇒ refundId IS NULL,
+///        REVERSAL ⇒ refundId IS NOT NULL.
+///   • CHECK "tcs_ledger_rate_positive":  rateBps > 0.
+///
+/// No Prisma relations are declared to Store/Seller/SellerOrder/Refund on
+/// purpose: those models live in other agents' schema files and a Prisma
+/// relation needs a back-reference on BOTH sides. These are plain scalar FK
+/// columns (indexed) — the canonical shape for an append-only ledger/event
+/// table anyway.
+
+model TcsLedger {
+  id String @id @default(uuid())
+
+  /// ACCRUAL (positive, at capture / COD-confirm) or REVERSAL (negative, on a
+  /// finalized refund). A refund's reversal is a distinct row from its accrual.
+  kind TcsLedgerKind
+
+  /// Reporting period the row belongs to, `YYYY-MM` (GSTR-8 is monthly). For an
+  /// accrual this is the supply month; for a reversal, the refund month.
+  /// // NEEDS CA SIGN-OFF — reversal-period basis (supply month vs credit-note month).
+  period String @db.VarChar(7)
+
+  /// Denormalised owner keys (no Prisma relation — see header note).
+  storeId       String
+  sellerId      String
+  sellerOrderId String
+  /// Set ONLY on a REVERSAL row (the refund that caused it). NULL on ACCRUAL.
+  refundId String?
+
+  /// Base the TCS % is applied to = Σ per-line taxableValue (frozen at
+  /// placement) [+ shipping composite-supply taxable value, if enabled].
+  /// // NEEDS CA SIGN-OFF — the exact "net taxable value" definition.
+  /// Stored at 4dp (GST-grade precision, matching OrderItem.taxableValue);
+  /// negative on a REVERSAL row.
+  netTaxableValue Decimal @db.Decimal(14, 4) @default(0)
+
+  /// TCS split. Intra-state → cgstTcs + sgstTcs (0.5% each); inter-state →
+  /// igstTcs (1%). Rounded to paise. Negative on a REVERSAL row.
+  /// // NEEDS CA SIGN-OFF — the 1% total rate and the CGST/SGST 0.5%+0.5% split.
+  cgstTcs Decimal @db.Decimal(14, 4) @default(0)
+  sgstTcs Decimal @db.Decimal(14, 4) @default(0)
+  igstTcs Decimal @db.Decimal(14, 4) @default(0)
+
+  /// Total applied TCS rate in basis points (100 = 1%). Frozen on the row so a
+  /// later rate change never retroactively rewrites history.
+  /// // NEEDS CA SIGN-OFF — the statutory rate.
+  rateBps Int
+
+  /// 'INTRA_STATE' | 'INTER_STATE' — copied from the SellerOrder's frozen
+  /// taxKind so accrual + reversal always agree on the split.
+  taxKind String @db.VarChar(20)
+
+  createdAt DateTime @default(now())
+
+  @@index([period])
+  @@index([sellerId, period])
+  @@index([storeId, period])
+  @@index([sellerOrderId])
+  @@index([refundId])
+}
+
+/// One TCS deposit obligation per reporting period. Rolled up from the ledger by
+/// TcsService and marked DEPOSITED by an admin once the CA files GSTR-8 and pays
+/// the challan. `period @unique` = one deposit row per YYYY-MM.
+model TcsDeposit {
+  id     String @id @default(uuid())
+  period String @unique @db.VarChar(7)
+
+  /// Period roll-up (accruals − reversals) at aggregate time. 2dp (rupees).
+  netTaxableValue Decimal @db.Decimal(14, 2) @default(0)
+  cgstTcs         Decimal @db.Decimal(14, 2) @default(0)
+  sgstTcs         Decimal @db.Decimal(14, 2) @default(0)
+  igstTcs         Decimal @db.Decimal(14, 2) @default(0)
+  totalTcs        Decimal @db.Decimal(14, 2) @default(0)
+
+  status TcsDepositStatus @default(PENDING)
+
+  /// Government challan / CIN reference pasted by finance on deposit.
+  challanRef    String?
+  depositedById String?
+  depositedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+enum TcsLedgerKind {
+  ACCRUAL
+  REVERSAL
+}
+
+enum TcsDepositStatus {
+  PENDING
+  DEPOSITED
+}

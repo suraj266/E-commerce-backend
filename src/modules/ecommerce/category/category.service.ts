@@ -305,20 +305,13 @@ export class CategoryService {
   }
 
   async remove(id: string) {
-    // Soft delete
     return this.prisma.category.update({
       where: { id },
       data: { deletedAt: new Date() },
     });
   }
 
-
-  /**
-   * Batch updates categories when drag-and-drop operations occur.
-   * Utilizes a database transaction to ensure atomicity.
-   */
   async updateTree({ items }: UpdateCategoryTreeInput) {
-    // We use a transaction because we are updating multiple records simultaneously.
     const updatePromises = items.map((item) =>
       this.prisma.category.update({
         where: { id: item.id },
@@ -329,7 +322,6 @@ export class CategoryService {
       })
     );
 
-    // Executes all updates safely; if one fails, none apply.
     await this.prisma.$transaction(updatePromises);
     return true;
   }

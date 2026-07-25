@@ -1,6 +1,6 @@
 import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
 import { BadRequestException } from '@nestjs/common';
-import { PayoutStatus, Prisma } from '@prisma/client';
+import { PayoutAdjustmentStatus, PayoutStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
 import { PayoutService } from './payout.service';
@@ -152,6 +152,34 @@ describe('PayoutService', () => {
       await expect(
         service.markPayoutFailed('payout-1', 'bank bounce'),
       ).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('reverts absorbed clawback adjustments to PENDING so they carry forward (review #4)', async () => {
+      prisma.payout.findUnique.mockResolvedValue({
+        id: 'payout-1',
+        status: PayoutStatus.PROCESSING,
+        items: [{ sellerOrderId: 'so-1' }],
+      } as never);
+      prisma.$transaction.mockResolvedValue([] as never);
+
+      await service.markPayoutFailed('payout-1', 'bank bounce');
+
+      // The APPLIED clawbacks on this dead payout must be released back to
+      // PENDING (payoutId/appliedAt cleared) so the next run re-absorbs them —
+      // otherwise the seller is overpaid by the un-recovered commission.
+      expect(prisma.payoutAdjustment.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            payoutId: 'payout-1',
+            status: PayoutAdjustmentStatus.APPLIED,
+          }),
+          data: expect.objectContaining({
+            status: PayoutAdjustmentStatus.PENDING,
+            payoutId: null,
+            appliedAt: null,
+          }),
+        }),
+      );
     });
   });
 });

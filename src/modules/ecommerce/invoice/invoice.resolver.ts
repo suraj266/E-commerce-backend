@@ -86,6 +86,7 @@ export class InvoiceResolver {
     return this.invoice.previewHtml(input.htmlBody, input.css);
   }
 
+  /** Saves edits to the invoice template (HBS/CSS), stamping the editing user. Auth: invoice:manage permission. */
   @Mutation(() => InvoiceTemplate)
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('invoice:manage')

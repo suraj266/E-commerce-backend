@@ -26,6 +26,7 @@ export class CourierResolver {
 
   // --- Account config ---
 
+  /** The seller's connected courier accounts (masked — no credentials/token). Auth: logged-in seller. */
   @Query(() => [CourierAccountSafe], { name: 'myCourierAccounts' })
   async myCourierAccounts(@CurrentUser() user: CurrentUserPayload) {
     const list = await this.accounts.myAccounts(user.userId);
@@ -39,6 +40,7 @@ export class CourierResolver {
     return `${base}/webhooks/courier`;
   }
 
+  /** Connect a courier provider account; validates + mints a token immediately, only enabling on success. Auth: logged-in seller. */
   @Mutation(() => CourierAccountSafe)
   async connectCourierAccount(
     @CurrentUser() user: CurrentUserPayload,
@@ -48,6 +50,7 @@ export class CourierResolver {
     return this.accounts.toSafeShape(a);
   }
 
+  /** Re-test a connected provider's stored credentials, refreshing its auth token. Auth: logged-in seller. */
   @Mutation(() => CourierAccountSafe)
   async testCourierConnection(
     @CurrentUser() user: CurrentUserPayload,
@@ -57,6 +60,7 @@ export class CourierResolver {
     return this.accounts.toSafeShape(a);
   }
 
+  /** Enable/disable a provider account (the enabled one drives live rates + fulfillment). Auth: logged-in seller. */
   @Mutation(() => CourierAccountSafe)
   async setCourierAccountEnabled(
     @CurrentUser() user: CurrentUserPayload,
@@ -69,6 +73,7 @@ export class CourierResolver {
 
   // --- Pickup locations (fetch from provider, seller selects one) ---
 
+  /** Fetch the provider's existing pickup locations so the seller can pick one. Auth: logged-in seller. */
   @Query(() => [CourierPickupLocation], { name: 'courierPickupLocations' })
   courierPickupLocations(
     @CurrentUser() user: CurrentUserPayload,
@@ -77,6 +82,7 @@ export class CourierResolver {
     return this.courier.listPickupLocations(user.userId, provider);
   }
 
+  /** Store the webhook token the seller pasted from their courier panel (used to verify inbound tracking). Auth: logged-in seller. */
   @Mutation(() => CourierAccountSafe)
   async setCourierWebhookToken(
     @CurrentUser() user: CurrentUserPayload,
@@ -87,6 +93,7 @@ export class CourierResolver {
     return this.accounts.toSafeShape(a);
   }
 
+  /** Select which existing provider pickup location the seller's orders ship from. Auth: logged-in seller. */
   @Mutation(() => CourierAccountSafe)
   async setCourierPickupLocation(
     @CurrentUser() user: CurrentUserPayload,

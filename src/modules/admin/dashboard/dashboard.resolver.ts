@@ -12,6 +12,7 @@ import { Permissions } from '@/common/decorators/permissions.decorator';
 export class DashboardResolver {
   constructor(private readonly service: DashboardService) {}
 
+  /** Admin dashboard KPIs — revenue/orders/products/users MoM, monthly chart, recent orders. Auth: dashboard:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('dashboard:read')
   @Query(() => AdminDashboardStats, { name: 'adminDashboardStats' })

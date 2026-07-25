@@ -37,6 +37,7 @@ export class ProductResolver {
   // Self (seller-bound)
   // ---------------------------------------------------------------------------
 
+  /** Seller's own product list; filter by store/status. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [Product], { name: 'myProducts' })
   myProducts(
@@ -48,6 +49,7 @@ export class ProductResolver {
     return this.productService.myProducts(user.userId, storeId, status);
   }
 
+  /** Fetch one of the seller's own products by id. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Product, { name: 'myProduct' })
   myProduct(
@@ -57,6 +59,7 @@ export class ProductResolver {
     return this.productService.myProduct(user.userId, id);
   }
 
+  /** Seller creates a product in their own store; starts DRAFT, needs a VERIFIED seller. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Product)
   createMyProduct(
@@ -66,6 +69,7 @@ export class ProductResolver {
     return this.productService.createMyProduct(user.userId, input);
   }
 
+  /** Seller edits their own product; price/sku land on the default variant. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Product)
   updateMyProduct(
@@ -75,6 +79,7 @@ export class ProductResolver {
     return this.productService.updateMyProduct(user.userId, input);
   }
 
+  /** Seller sets own product status; ACTIVE enforces GST publish gates, ARCHIVE is admin-only. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Product)
   setMyProductStatus(
@@ -84,6 +89,7 @@ export class ProductResolver {
     return this.productService.setMyProductStatus(user.userId, input);
   }
 
+  /** Seller soft-deletes their product; only DRAFT or ARCHIVED can be deleted. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Product)
   removeMyProduct(
@@ -97,6 +103,7 @@ export class ProductResolver {
   // Image management (seller, scoped to own products)
   // ---------------------------------------------------------------------------
 
+  /** Seller adds an image to their product; first image (or isPrimary) becomes primary. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => ProductImage)
   addMyProductImage(
@@ -106,6 +113,7 @@ export class ProductResolver {
     return this.productService.addImage(user.userId, input);
   }
 
+  /** Seller edits a product image (alt text / order / primary flag). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => ProductImage)
   updateMyProductImage(
@@ -115,6 +123,7 @@ export class ProductResolver {
     return this.productService.updateImage(user.userId, input);
   }
 
+  /** Seller hard-deletes one of their product images. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => ProductImage)
   removeMyProductImage(
@@ -124,6 +133,7 @@ export class ProductResolver {
     return this.productService.removeImage(user.userId, id);
   }
 
+  /** Seller reorders their product's images by id list. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Boolean)
   reorderMyProductImages(
@@ -137,6 +147,7 @@ export class ProductResolver {
   // Admin
   // ---------------------------------------------------------------------------
 
+  /** Admin catalog list, filter by status/store/brand/category. Auth: product:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('product:read')
   @Query(() => [Product], { name: 'adminProducts' })
@@ -155,6 +166,7 @@ export class ProductResolver {
     });
   }
 
+  /** Admin fetches any product by id (all statuses). Auth: product:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('product:read')
   @Query(() => Product, { name: 'adminProduct' })
@@ -162,6 +174,7 @@ export class ProductResolver {
     return this.productService.findOneById(id);
   }
 
+  /** Admin creates a product under any store; can publish immediately via status. Auth: product:create. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('product:create')
   @Mutation(() => Product)
@@ -169,6 +182,7 @@ export class ProductResolver {
     return this.productService.adminCreate(input);
   }
 
+  /** Admin edits any product (bypasses seller-ownership); may also change status. Auth: product:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('product:update')
   @Mutation(() => Product)
@@ -176,6 +190,7 @@ export class ProductResolver {
     return this.productService.adminUpdate(input);
   }
 
+  /** Admin sets any product's status; records reason + timestamp in metadata. Auth: product:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('product:update')
   @Mutation(() => Product)
@@ -189,6 +204,7 @@ export class ProductResolver {
   // Public
   // ---------------------------------------------------------------------------
 
+  /** Storefront PDP by slug; only ACTIVE products in ACTIVE stores, enriched with per-variant stock. Public. */
   @Query(() => Product, { name: 'publicProduct' })
   publicProduct(@Args('slug', { type: () => String }) slug: string) {
     return this.productService.findPublic(slug);
@@ -196,7 +212,7 @@ export class ProductResolver {
 
   /**
    * Public catalog query — used by store pages, brand pages, tag pages, and
-   * category pages. Returns only ACTIVE products from ACTIVE stores.
+   * category pages. Returns only ACTIVE products from ACTIVE stores. Public.
    */
   @Query(() => [Product], { name: 'publicProducts' })
   publicProducts(
@@ -223,7 +239,7 @@ export class ProductResolver {
 
   /**
    * Paginated catalog with price-range filter — backs /shop. Like
-   * `publicProducts` but returns totals for the pager.
+   * `publicProducts` but returns totals for the pager. Public.
    */
   @Query(() => PaginatedProducts, { name: 'paginatedPublicProducts' })
   paginatedPublicProducts(
@@ -259,7 +275,7 @@ export class ProductResolver {
 
   /**
    * Header autocomplete. Returns up to `limit` light-weight product rows
-   * matching the term. The full /search page uses paginatedPublicProducts.
+   * matching the term. The full /search page uses paginatedPublicProducts. Public.
    */
   @Query(() => SearchSuggestions, { name: 'searchSuggestions' })
   searchSuggestions(
@@ -273,6 +289,7 @@ export class ProductResolver {
   // Variants — Phase B
   // ---------------------------------------------------------------------------
 
+  /** Lists all variants of a product the seller owns. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [ProductVariant], { name: 'myProductVariants' })
   myProductVariants(
@@ -282,6 +299,7 @@ export class ProductResolver {
     return this.productService.myProductVariants(user.userId, productId);
   }
 
+  /** Variant axes (attribute + values) configured for the seller's product. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [VariantAxis], { name: 'myProductVariantAxes' })
   myProductVariantAxes(
@@ -291,6 +309,7 @@ export class ProductResolver {
     return this.productService.myProductVariantAxes(user.userId, productId);
   }
 
+  /** Sets variant axes for a VARIABLE product; blocked if variants already exist. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => [VariantAxis])
   setMyProductVariantAxes(
@@ -300,6 +319,7 @@ export class ProductResolver {
     return this.productService.setVariantAxes(user.userId, input);
   }
 
+  /** Generates the variant matrix (cartesian of axes); idempotent, capped at 100 combos. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => [ProductVariant])
   generateMyProductVariantMatrix(
@@ -309,6 +329,7 @@ export class ProductResolver {
     return this.productService.generateVariantMatrix(user.userId, input);
   }
 
+  /** Seller adds one variant (one value per axis, no duplicate combo) to a VARIABLE product. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => ProductVariant)
   addMyProductVariant(
@@ -318,6 +339,7 @@ export class ProductResolver {
     return this.productService.addMyVariant(user.userId, input);
   }
 
+  /** Seller edits one of their variants; re-syncs the product's cached base price. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => ProductVariant)
   updateMyProductVariant(
@@ -327,6 +349,7 @@ export class ProductResolver {
     return this.productService.updateMyVariant(user.userId, input);
   }
 
+  /** Seller soft-deletes a variant (drops its attribute rows). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => ProductVariant)
   removeMyProductVariant(
@@ -338,6 +361,7 @@ export class ProductResolver {
     return this.productService.removeMyVariant(user.userId, id);
   }
 
+  /** Bulk-updates price/compareAtPrice/status across a product's variants; returns count. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Number)
   bulkUpdateMyProductVariants(

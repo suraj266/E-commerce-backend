@@ -1,0 +1,59 @@
+/// =============================================================================
+/// Notification — in-app notification feed (Phase 3, P3-08).
+/// =============================================================================
+///
+/// One row per in-app notification shown in the user's notification bell. Rows
+/// are written best-effort ALONGSIDE the durable lifecycle emails, from inside
+/// the outbox worker handlers, so an in-app notification and its email share the
+/// same at-least-once delivery + retry guarantees.
+///
+/// `dedupeKey` makes worker-created notifications IDEMPOTENT under the outbox's
+/// at-least-once redelivery: the handler derives a stable key from the event
+/// (e.g. `notif:order_placed:<orderId>`) and NotificationService.create() writes
+/// via `createMany` + `skipDuplicates` (→ ON CONFLICT DO NOTHING on the unique
+/// index), so a redelivered job never produces a duplicate bell entry. A null
+/// dedupeKey is treated as DISTINCT by Postgres, so ad-hoc (non-idempotent)
+/// notifications can still be inserted freely.
+///
+/// `readAt` is null until the user marks the notification read; the unread badge
+/// counts rows with `readAt IS NULL`.
+///
+/// Not FK-bound to User on purpose (plain scalar `userId`, mirroring the audit /
+/// TCS ledgers) — keeps this additive migration self-contained and avoids
+/// editing user.prisma from a parallel workstream.
+model Notification {
+  id String @id @default(uuid())
+
+  /// The recipient user's id (the principal whose bell this shows in).
+  userId String
+
+  /// Notification kind, e.g. `order_placed`, `order_refunded`,
+  /// `seller_new_order`, `seller_kyc_approved`, `seller_kyc_rejected`,
+  /// `courier_alert`. A plain string (not an enum) so new kinds don't require a
+  /// migration.
+  type String
+
+  /// Short headline shown in the bell list.
+  title String
+  /// One-line body / description.
+  body String
+
+  /// Optional structured context (ids, amounts, deep-link targets) the frontend
+  /// uses to render + route the notification. Exposed to GraphQL as a JSON
+  /// string.
+  data Json?
+
+  /// Idempotency key for worker-created notifications (see the model note). Null
+  /// for ad-hoc notifications with no natural dedupe identity.
+  dedupeKey String? @unique
+
+  /// Set when the user marks this notification read; null while unread.
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// Feed read path: newest-first for a given user.
+  @@index([userId, createdAt])
+  /// Unread-count read path: unread rows for a given user.
+  @@index([userId, readAt])
+}

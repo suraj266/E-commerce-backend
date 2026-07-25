@@ -27,12 +27,14 @@ export class StoreResolver {
   // Self (seller-bound) — store core
   // ---------------------------------------------------------------------------
 
+  /** The caller's own stores. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [Store], { name: 'myStores' })
   myStores(@CurrentUser() user: CurrentUserPayload) {
     return this.storeService.myStores(user.userId);
   }
 
+  /** One of the caller's own stores by id (ownership-checked). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Store, { name: 'myStore', nullable: true })
   myStore(
@@ -42,6 +44,7 @@ export class StoreResolver {
     return this.storeService.myStore(user.userId, id);
   }
 
+  /** Create a store (seller must be VERIFIED); also seeds a default warehouse. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Store)
   createMyStore(
@@ -51,6 +54,7 @@ export class StoreResolver {
     return this.storeService.createMyStore(user.userId, input);
   }
 
+  /** Update the caller's own store (slug uniqueness + currency-lock-after-products enforced). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Store)
   updateMyStore(
@@ -60,6 +64,7 @@ export class StoreResolver {
     return this.storeService.updateMyStore(user.userId, input);
   }
 
+  /** Update the store's shipping config (flat/per-kg rates, COD, excluded pincodes), merged over existing. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Store)
   updateMyStoreShipping(
@@ -69,6 +74,7 @@ export class StoreResolver {
     return this.storeService.updateMyStoreShipping(user.userId, input);
   }
 
+  /** Submit a DRAFT store (needs an active warehouse); MVP skips review and goes straight to ACTIVE. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Store)
   submitMyStoreForReview(
@@ -78,6 +84,7 @@ export class StoreResolver {
     return this.storeService.submitMyStoreForReview(user.userId, id);
   }
 
+  /** Soft-delete the caller's own store (blocked if it still has products). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Store)
   removeMyStore(
@@ -91,6 +98,7 @@ export class StoreResolver {
   // Admin
   // ---------------------------------------------------------------------------
 
+  /** List all stores, optionally filtered by status. Auth: store:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('store:read')
   @Query(() => [Store], { name: 'stores' })
@@ -101,6 +109,7 @@ export class StoreResolver {
     return this.storeService.findAll(status);
   }
 
+  /** One store by id. Auth: store:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('store:read')
   @Query(() => Store, { name: 'store' })
@@ -108,6 +117,7 @@ export class StoreResolver {
     return this.storeService.findOne(id);
   }
 
+  /** Admin creates a store under any VERIFIED seller, ACTIVE immediately (+ default warehouse). Auth: store:create permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('store:create')
   @Mutation(() => Store)
@@ -115,6 +125,7 @@ export class StoreResolver {
     return this.storeService.adminCreate(input);
   }
 
+  /** Admin updates any store, bypassing the ownership check (same business rules). Auth: store:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('store:update')
   @Mutation(() => Store)
@@ -122,6 +133,7 @@ export class StoreResolver {
     return this.storeService.adminUpdate(input);
   }
 
+  /** Set a store's status, recording the action + reason in metadata. Auth: store:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('store:update')
   @Mutation(() => Store)
@@ -129,6 +141,7 @@ export class StoreResolver {
     return this.storeService.setStatus(input);
   }
 
+  /** Admin soft-deletes any store. Auth: store:delete permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('store:delete')
   @Mutation(() => Store)
@@ -140,6 +153,7 @@ export class StoreResolver {
   // Public
   // ---------------------------------------------------------------------------
 
+  /** Public storefront lookup by slug (ACTIVE stores only). Public. */
   @Query(() => Store, { name: 'publicStore' })
   publicStore(@Args('slug', { type: () => String }) slug: string) {
     return this.storeService.findPublic(slug);
@@ -149,6 +163,7 @@ export class StoreResolver {
   // Warehouse mutations (seller-managed)
   // ---------------------------------------------------------------------------
 
+  /** Add a warehouse to the caller's own store (first/`isDefault` becomes the default). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Warehouse)
   createMyWarehouse(
@@ -158,6 +173,7 @@ export class StoreResolver {
     return this.storeService.addMyWarehouse(user.userId, input);
   }
 
+  /** Update a warehouse on the caller's own store (setting default demotes the others). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Warehouse)
   updateMyWarehouse(
@@ -167,6 +183,7 @@ export class StoreResolver {
     return this.storeService.updateMyWarehouse(user.userId, input);
   }
 
+  /** Soft-delete a warehouse on the caller's own store (blocked if it holds inventory). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Warehouse)
   removeMyWarehouse(
@@ -176,6 +193,7 @@ export class StoreResolver {
     return this.storeService.removeMyWarehouse(user.userId, id);
   }
 
+  /** List warehouses for one of the caller's own stores (default first). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [Warehouse], { name: 'myWarehouses' })
   myWarehouses(

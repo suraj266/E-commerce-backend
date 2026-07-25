@@ -14,6 +14,7 @@ export class SiteSettingResolver {
 
   // ---- Public: storefront needs to read settings (no auth) ----
 
+  /** Public storefront read of site settings, optionally by group (display config). Public. */
   @Query(() => [SiteSetting], {
     name: 'siteSettings',
     description: 'Public — get settings by group. Used by storefront for display config.',
@@ -27,6 +28,7 @@ export class SiteSettingResolver {
 
   // ---- Admin: update settings ----
 
+  /** Admin updates a single site-setting value by key (404 if the key is unknown). Auth: setting:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('setting:update')
   @Mutation(() => SiteSetting, {

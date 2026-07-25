@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 
 /**
@@ -31,28 +32,40 @@ export class InvoiceNumberService {
     sellerId: string,
     on: Date = new Date(),
   ): Promise<{ invoiceNumber: string; invoiceDate: Date }> {
+    // Wrap the tx-aware allocator in its own transaction so standalone callers
+    // (and the 100-parallel test) keep the same atomic-increment guarantee.
+    return this.prisma.$transaction((tx) => this.allocateInTx(tx, sellerId, on));
+  }
+
+  /**
+   * Transaction-aware allocation. Identical semantics to `allocate` but runs on
+   * a caller-supplied Prisma transaction client so number allocation can commit
+   * ATOMICALLY with the row it is bound to (see `InvoiceService.reserveInvoiceNumber`).
+   * Splitting allocation from the PDF render is what stops a Puppeteer/S3 failure
+   * from burning a GST sequence number (CGST Rule 46) — the number is reserved in
+   * one tx, and a later re-render reuses the same reserved number.
+   *
+   * The atomic `upsert` + `increment` guarantees two concurrent callers never
+   * see the same `nextSeq`:
+   *   - create branch: row inserted with nextSeq=2 → we used 1
+   *   - update branch: row.nextSeq was incremented → we used (nextSeq - 1)
+   */
+  async allocateInTx(
+    tx: Prisma.TransactionClient,
+    sellerId: string,
+    on: Date = new Date(),
+  ): Promise<{ invoiceNumber: string; invoiceDate: Date }> {
     const fiscalYear = getFiscalYear(on);
     const sellerCode = sellerCodeFrom(sellerId);
 
-    // Atomic allocation: upsert + increment in a single transaction so two
-    // concurrent calls never see the same `nextSeq`. We compute the
-    // allocated number from the post-increment value:
-    //
-    //   - create branch: row inserted with nextSeq=2 → we used 1
-    //   - update branch: row.nextSeq was incremented → we used (nextSeq - 1)
-    //
-    // Both branches return `nextSeq - 1` so the caller doesn't need to
-    // know which path executed.
-    const seq = await this.prisma.$transaction(async (tx) => {
-      const row = await tx.invoiceSequence.upsert({
-        where: {
-          sellerId_fiscalYear: { sellerId, fiscalYear },
-        },
-        update: { nextSeq: { increment: 1 } },
-        create: { sellerId, fiscalYear, nextSeq: 2 },
-      });
-      return row.nextSeq - 1;
+    const row = await tx.invoiceSequence.upsert({
+      where: {
+        sellerId_fiscalYear: { sellerId, fiscalYear },
+      },
+      update: { nextSeq: { increment: 1 } },
+      create: { sellerId, fiscalYear, nextSeq: 2 },
     });
+    const seq = row.nextSeq - 1;
 
     return {
       invoiceNumber: `INV/${fiscalYear}/${sellerCode}/${String(seq).padStart(6, '0')}`,

@@ -32,6 +32,7 @@ export class EmailResolver {
   // ---------------------------------------------------------------------------
   // Settings
   // ---------------------------------------------------------------------------
+  /** SMTP config for the admin UI; password stripped, exposes only hasPassword. Auth: email:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('email:read')
   @Query(() => EmailSetting, { name: 'emailSetting' })
@@ -39,6 +40,7 @@ export class EmailResolver {
     return this.configSvc.getSafe();
   }
 
+  /** Update SMTP config; a blank password keeps the stored (encrypted) one. Auth: email:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('email:update')
   @Mutation(() => EmailSetting)
@@ -52,6 +54,7 @@ export class EmailResolver {
   // ---------------------------------------------------------------------------
   // Templates
   // ---------------------------------------------------------------------------
+  /** List all email templates. Auth: email:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('email:read')
   @Query(() => [EmailTemplate], { name: 'emailTemplates' })
@@ -59,6 +62,7 @@ export class EmailResolver {
     return this.templateSvc.list();
   }
 
+  /** Fetch one email template by id. Auth: email:read. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('email:read')
   @Query(() => EmailTemplate, { name: 'emailTemplate' })
@@ -66,6 +70,7 @@ export class EmailResolver {
     return this.templateSvc.getById(id);
   }
 
+  /** Update an email template's subject/body. Auth: email:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('email:update')
   @Mutation(() => EmailTemplate)
@@ -79,6 +84,7 @@ export class EmailResolver {
   // ---------------------------------------------------------------------------
   // Send test
   // ---------------------------------------------------------------------------
+  /** Send a test email — rendered template preview, or a raw SMTP check — to verify credentials. Auth: email:update. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('email:update')
   @Mutation(() => SendTestResult)

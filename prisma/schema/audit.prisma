@@ -1,0 +1,61 @@
+/// =============================================================================
+/// AuditLog — append-only security audit trail (Phase 3, P3-05).
+/// =============================================================================
+///
+/// An immutable record of every sensitive action over the money-movers the
+/// Phase 1-2 rails added (refund approve/reject/processed, payout run/mark-paid/
+/// mark-failed, gateway-config create/update, role changes). Each row captures
+/// WHO (actorUserId / actorEmail), WHAT (action / entityType / entityId), the
+/// state transition (before / after JSON snapshots), and the request context
+/// (ip / userAgent / requestId — the correlation id from getCorrelationId()).
+///
+/// Written best-effort via `AuditService.record()`, which swallows its own
+/// errors so an audit failure can NEVER roll back or fail a business
+/// transaction. Writes are plain INSERTs.
+///
+/// APPEND-ONLY ENFORCEMENT lives in the DB, not here: Prisma cannot model
+/// triggers, so the hand-authored migration
+/// (prisma/migrations/20260718120000_audit_log/migration.sql) installs a
+/// trigger function + BEFORE UPDATE / BEFORE DELETE triggers that RAISE
+/// EXCEPTION — the table is insert-only at the database level. Do not add
+/// application code that UPDATEs or DELETEs an AuditLog row; it will error.
+///
+/// LEGAL SIGN-OFF (P3-05): the audit-log RETENTION PERIOD, and whether `ip`
+/// must be TRUNCATED before storage (an IP address is DPDP personal data), are
+/// both pending legal sign-off. See AuditService.record() for the ip note.
+model AuditLog {
+  id String @id @default(uuid())
+
+  /// The acting user's id, when known (null for system/cron/anonymous actions).
+  actorUserId String?
+  /// The acting user's email captured at action time (denormalised so the trail
+  /// survives even if the user is later anonymised under DPDP erasure).
+  actorEmail String?
+
+  /// Dot-namespaced verb, e.g. `refund.approve`, `payout.mark_paid`,
+  /// `payment_config.update`.
+  action String
+  /// The domain entity kind, e.g. `Refund`, `Payout`, `PaymentGatewayConfig`.
+  entityType String
+  /// The affected entity's id, when the action targets a single row.
+  entityId String?
+
+  /// State snapshot BEFORE the action (secrets/credentials REDACTED to "***").
+  before Json?
+  /// State snapshot AFTER the action (secrets/credentials REDACTED to "***").
+  after Json?
+
+  /// Caller IP. DPDP personal data — see the LEGAL SIGN-OFF note above.
+  ip String?
+  /// Caller User-Agent header.
+  userAgent String?
+  /// Correlation id (getCorrelationId()) so the audit row lines up with the
+  /// originating request's logs + Sentry events.
+  requestId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorUserId])
+  @@index([createdAt])
+}

@@ -4,8 +4,16 @@
 ///
 /// `source` records where the address came from (e.g. "homepage-newsletter")
 /// so the admin can correlate signups to specific blocks/pages.
+///
+/// DOUBLE OPT-IN (P3-08): a signup creates/updates a PENDING row with a
+/// single-use `confirmToken` (+ `confirmTokenExpiresAt`) and enqueues a durable
+/// `newsletter.confirm` email via the outbox. The subscriber becomes ACTIVE only
+/// after clicking the confirmation link (confirmNewsletter(token)). Only ACTIVE
+/// subscribers are marketable — a PENDING address must never receive marketing.
 
 enum NewsletterStatus {
+  /// Awaiting double opt-in confirmation — NOT yet marketable.
+  PENDING
   ACTIVE
   UNSUBSCRIBED
 }
@@ -14,11 +22,132 @@ model NewsletterSubscription {
   id              String           @id @default(uuid())
   email           String           @unique
   source          String?
-  status          NewsletterStatus @default(ACTIVE)
+  status          NewsletterStatus @default(PENDING)
+
+  /// Single-use double opt-in token emailed to the subscriber. Unique so the
+  /// public confirmNewsletter(token) lookup is O(1) and unguessable. Refreshed
+  /// on every (re)subscribe; retained after confirmation so a re-clicked link is
+  /// an idempotent success rather than a "not found".
+  confirmToken          String?   @unique
+  /// When the confirmation token stops being valid. A PENDING row whose token
+  /// has expired can never be confirmed (the subscriber must re-subscribe).
+  confirmTokenExpiresAt DateTime?
+  /// When the subscriber completed double opt-in (PENDING -> ACTIVE).
+  confirmedAt           DateTime?
+
+  /// Stable, unguessable per-subscriber token embedded in the unsubscribe link
+  /// of every BROADCAST email (P3 Wave 4). Lazily minted the first time a
+  /// campaign is delivered to this address (see NewsletterService.deliver…) and
+  /// reused across campaigns. NULL until then; @unique gives the public
+  /// unsubscribe-by-token mutation an O(1), enumeration-resistant lookup. This is
+  /// ADDITIVE to the double opt-in flow — the confirm/PENDING->ACTIVE path never
+  /// reads or writes it.
+  unsubscribeToken      String?   @unique
+
   /// Set when the subscriber clicks an unsubscribe link.
   unsubscribedAt  DateTime?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
   @@index([status, createdAt])
+}
+
+/// =============================================================================
+/// NewsletterCampaign — consent-gated bulk marketing broadcast (P3 Wave 4).
+/// =============================================================================
+///
+/// The FIRST caller of the DPDP marketing-consent gate (PrivacyService.canMarket
+/// via NewsletterService.filterMarketableRecipients). An admin composes a
+/// campaign (DRAFT), then SENDS it: a durable `newsletter.campaign_send` outbox
+/// event is enqueued IN-TX with the DRAFT->SENDING flip. A worker then fans the
+/// campaign out over ACTIVE subscribers in batches — dropping any registered
+/// user who revoked marketing consent (fail-closed) and keeping email-only
+/// double-opt-in subscribers (their confirmation IS their consent) — enqueuing
+/// one durable `newsletter.campaign_deliver` per surviving recipient.
+///
+/// IDEMPOTENT: an already-SENT campaign is a no-op; the fan-out is resumable and
+/// per-recipient de-duplicated (NewsletterCampaignRecipient @@unique + the outbox
+/// dedupeKey), so a crash/redelivery never double-enqueues or double-counts.
+model NewsletterCampaign {
+  id      String @id @default(uuid())
+  /// Rendered as the email Subject (Handlebars {{subject}} in the wrapper).
+  subject String
+  /// Admin-authored HTML body, injected verbatim ({{{body}}}) into the
+  /// `newsletter_campaign` wrapper template (which supplies header/footer +
+  /// unsubscribe link).
+  htmlBody String
+
+  /// Who this broadcast targets. Only ACTIVE_SUBSCRIBERS today; kept as an enum
+  /// so future segments (e.g. a saved audience) don't need a schema break.
+  audience NewsletterAudience       @default(ACTIVE_SUBSCRIBERS)
+  status   NewsletterCampaignStatus @default(DRAFT)
+
+  /// Denormalized outcome counters, finalized (idempotently, recomputed from the
+  /// recipient rows) when the fan-out completes. recipientCount = total ACTIVE
+  /// addresses considered; sentCount = enqueued/delivered; skippedCount = dropped
+  /// by the consent gate or a mid-flight unsubscribe.
+  recipientCount Int @default(0)
+  sentCount      Int @default(0)
+  skippedCount   Int @default(0)
+
+  /// The admin who triggered the send (audit trail). Soft reference — no FK, so
+  /// a later DPDP erasure of that admin never blocks reading the campaign.
+  createdByUserId String?
+
+  sendStartedAt DateTime?
+  sentAt        DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  recipients NewsletterCampaignRecipient[]
+
+  @@index([status, createdAt])
+}
+
+enum NewsletterAudience {
+  /// Every double-opt-in ACTIVE subscriber (further filtered by the consent gate).
+  ACTIVE_SUBSCRIBERS
+}
+
+enum NewsletterCampaignStatus {
+  /// Composed but not yet sent — editable.
+  DRAFT
+  /// Fan-out in progress (durable outbox draining).
+  SENDING
+  /// Fan-out complete — terminal, re-send is a no-op.
+  SENT
+}
+
+/// Per-(campaign, subscriber) delivery ledger. Gives the fan-out true
+/// at-most-once-enqueue semantics (@@unique) + a durable record of who was
+/// mailed vs. skipped and why. `subscriptionId` is a SOFT reference (no FK) so a
+/// subscriber row deletion never cascades away campaign history; the delivery
+/// handler re-reads the subscription and no-ops if it is gone/unsubscribed.
+model NewsletterCampaignRecipient {
+  id             String                            @id @default(uuid())
+  campaignId     String
+  campaign       NewsletterCampaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  /// Soft reference to NewsletterSubscription.id (no FK — see model doc).
+  subscriptionId String
+  /// Snapshot of the target address at fan-out time (audit + display).
+  email          String
+  status         NewsletterCampaignRecipientStatus @default(QUEUED)
+  /// Why a recipient was SKIPPED — e.g. `consent-revoked`, `unsubscribed`.
+  skipReason     String?
+  sentAt         DateTime?
+  createdAt      DateTime                          @default(now())
+  updatedAt      DateTime                          @updatedAt
+
+  @@unique([campaignId, subscriptionId])
+  @@index([campaignId, status])
+}
+
+enum NewsletterCampaignRecipientStatus {
+  /// A durable `newsletter.campaign_deliver` event has been enqueued.
+  QUEUED
+  /// The delivery handler dispatched (or soft-skipped) the email.
+  SENT
+  /// Dropped before enqueue (no marketing consent) or at delivery time
+  /// (unsubscribed after being queued).
+  SKIPPED
 }

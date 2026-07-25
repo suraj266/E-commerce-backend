@@ -35,6 +35,7 @@ import { UpdateSellerOrderStatusInput } from './dto/update-seller-order-status.i
 import { isValidTransition } from './order.helpers';
 import { SELLER_ORDER_INCLUDE, hydrateSellerOrder } from './order.hydrate';
 import { InvoiceService } from '../invoice/invoice.service';
+import { TcsService } from '@/modules/compliance/tcs/tcs.service';
 import { CourierService } from '../courier/courier.service';
 
 const STATUS_TO_TEMPLATE: Partial<Record<OrderStatus, string>> = {
@@ -74,6 +75,9 @@ export class SellerOrderService {
     private readonly invoice: InvoiceService,
     @Inject(forwardRef(() => CourierService))
     private readonly courier: CourierService,
+    // @Global TcsService (P3-03). Optional/guarded so the COD-confirm accrual is
+    // a no-op wherever TcsModule isn't present (e.g. isolated unit contexts).
+    private readonly tcs?: TcsService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -464,6 +468,14 @@ export class SellerOrderService {
           notes: input.notes ?? null,
         },
       });
+
+      // COD confirmation is the taxable event for a COD seller-order (the tax
+      // invoice also generates on confirm, below). Accrue marketplace TCS §52
+      // INSIDE this tx so the ledger row commits atomically with the CONFIRMED
+      // flip. Idempotent (unique per seller-order) — safe under retries.
+      if (isCodConfirmation) {
+        await this.tcs?.accrue(tx, existing.id);
+      }
 
       // When sub-order transitions to DELIVERED, if every sibling is also
       // delivered, stamp the parent Order's deliveredAt for analytics.

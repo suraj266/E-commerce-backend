@@ -181,6 +181,23 @@ const defaultSleep = (ms: number): Promise<void> =>
   });
 
 /**
+ * Exponential-backoff-with-full-jitter delay for a given (zero-based) attempt.
+ *
+ * `delay ∈ [0, min(maxDelayMs, baseDelayMs · 2^attempt))`. Full jitter avoids a
+ * thundering-herd of retries firing in lockstep. Shared by `withResilience`
+ * (per-call retries) and the durable outbox (which persists the resulting delay
+ * into `OutboxEvent.nextRunAt`) so both back off on identical math.
+ */
+export function backoffDelayMs(
+  attempt: number,
+  opts: { baseDelayMs?: number; maxDelayMs?: number } = {},
+): number {
+  const { baseDelayMs = 300, maxDelayMs = 5000 } = opts;
+  const ceiling = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+  return Math.floor(Math.random() * ceiling);
+}
+
+/**
  * Full outbound resilience: each attempt is bounded by `withTimeout`, and on a
  * retry-worthy failure we back off (exponential + full jitter) and try again,
  * up to `retries` times. Non-retryable errors (per `retryOn`) throw
@@ -220,8 +237,7 @@ export async function withResilience<T>(
       }
 
       // Exponential backoff with full jitter: random in [0, min(cap, base*2^n)].
-      const ceiling = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
-      const delay = Math.floor(Math.random() * ceiling);
+      const delay = backoffDelayMs(attempt, { baseDelayMs, maxDelayMs });
       resilienceLogger.warn(
         `Outbound "${label}" transient failure (attempt ${attempt + 1}/${retries + 1}), ` +
           `retrying in ${delay}ms: ${(err as Error)?.message ?? err}`,

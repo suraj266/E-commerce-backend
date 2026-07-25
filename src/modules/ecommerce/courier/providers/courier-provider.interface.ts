@@ -94,6 +94,34 @@ export interface ShipmentResult {
   providerShipmentId: string;
 }
 
+/**
+ * Reverse (return) pickup request (P3-02). The courier COLLECTS from the buyer
+ * (`customer`) and delivers back to the seller (`seller`). `pickupLocationNickname`
+ * is the seller's registered return/warehouse location.
+ */
+export interface CreateReturnShipmentRequest {
+  /** Original forward SellerOrder.orderNumber (for provider correlation). */
+  orderNumber: string;
+  /** Our RMA number → the reverse shipment's provider order_id. */
+  returnNumber: string;
+  orderDate: Date;
+  pickupLocationNickname: string;
+  /** Where the courier collects the item — the buyer. */
+  customer: ShipmentAddress;
+  /** Where the item is returned to — the seller warehouse. */
+  seller: ShipmentAddress;
+  items: {
+    name: string;
+    sku: string;
+    units: number;
+    sellingPrice: number;
+    hsn?: string | null;
+  }[];
+  subTotal: number;
+  weightKg: number;
+  dimensionsCm: { length: number; breadth: number; height: number };
+}
+
 export interface AwbResult {
   awbCode: string;
   courierName: string;
@@ -182,6 +210,11 @@ export interface ICourierProvider {
 
   getRates(ctx: CourierContext, req: RateRequest): Promise<RateQuote[]>;
   createShipment(ctx: CourierContext, req: CreateShipmentRequest): Promise<ShipmentResult>;
+  /** Create a REVERSE (return) pickup shipment (P3-02). */
+  createReturnShipment(
+    ctx: CourierContext,
+    req: CreateReturnShipmentRequest,
+  ): Promise<ShipmentResult>;
   assignAwb(ctx: CourierContext, shipmentId: string, courierId?: string | null): Promise<AwbResult>;
   schedulePickup(ctx: CourierContext, shipmentId: string): Promise<PickupResult>;
   getLabel(ctx: CourierContext, shipmentId: string): Promise<LabelResult>;

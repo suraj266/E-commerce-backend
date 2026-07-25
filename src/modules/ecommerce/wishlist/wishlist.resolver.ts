@@ -19,16 +19,19 @@ import { ToggleWishlistInput } from './dto/toggle-wishlist.input';
 export class WishlistResolver {
   constructor(private readonly wishlistService: WishlistService) {}
 
+  /** The caller's default wishlist with hydrated products (created on first access). Auth: logged-in customer. */
   @Query(() => Wishlist, { name: 'myWishlist' })
   myWishlist(@CurrentUser() user: CurrentUserPayload) {
     return this.wishlistService.myWishlist(user.userId);
   }
 
+  /** Lightweight set of wishlisted product IDs for rendering filled hearts on cards. Auth: logged-in customer. */
   @Query(() => [String], { name: 'myWishlistProductIds' })
   myWishlistProductIds(@CurrentUser() user: CurrentUserPayload) {
     return this.wishlistService.myWishlistProductIds(user.userId);
   }
 
+  /** Add a product to the caller's wishlist (idempotent; validates the product). Auth: logged-in customer. */
   @Mutation(() => Wishlist)
   addToWishlist(
     @CurrentUser() user: CurrentUserPayload,
@@ -37,6 +40,7 @@ export class WishlistResolver {
     return this.wishlistService.add(user.userId, input);
   }
 
+  /** Remove a product from the caller's wishlist. Auth: logged-in customer. */
   @Mutation(() => Wishlist)
   removeFromWishlist(
     @CurrentUser() user: CurrentUserPayload,
@@ -45,6 +49,7 @@ export class WishlistResolver {
     return this.wishlistService.remove(user.userId, input);
   }
 
+  /** Empty the caller's wishlist entirely. Auth: logged-in customer. */
   @Mutation(() => Wishlist)
   clearWishlist(@CurrentUser() user: CurrentUserPayload) {
     return this.wishlistService.clear(user.userId);

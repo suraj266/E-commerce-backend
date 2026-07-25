@@ -28,6 +28,7 @@ export class CouponCustomerResolver {
     private readonly prisma: PrismaService,
   ) {}
 
+  /** Previews a coupon against the customer's live cart (discount + GST recompute); writes no redemption. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => CouponValidation)
   async validateCoupon(

@@ -31,6 +31,7 @@ export class SellerResolver {
   // Self queries (any authenticated user can fetch their own seller record)
   // ---------------------------------------------------------------------------
 
+  /** The caller's own seller record (null if they haven't onboarded). Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Seller, { name: 'mySeller', nullable: true })
   findMine(@CurrentUser() user: CurrentUserPayload) {
@@ -41,6 +42,7 @@ export class SellerResolver {
   // Admin queries
   // ---------------------------------------------------------------------------
 
+  /** List seller profiles, optionally filtered by overall status. Auth: seller:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:read')
   @Query(() => [Seller], { name: 'sellers' })
@@ -65,6 +67,7 @@ export class SellerResolver {
     return this.sellerService.findSellerUsers(status);
   }
 
+  /** One seller profile by id. Auth: seller:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:read')
   @Query(() => Seller, { name: 'seller' })
@@ -76,6 +79,7 @@ export class SellerResolver {
   // Self-onboarding mutations
   // ---------------------------------------------------------------------------
 
+  /** Start seller onboarding — creates the caller's own DRAFT seller profile. Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Seller)
   createMySeller(
@@ -85,6 +89,7 @@ export class SellerResolver {
     return this.sellerService.createSelf(user.userId, input);
   }
 
+  /** Update the caller's own seller profile (only in DRAFT/REJECTED state). Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Seller)
   updateMySeller(
@@ -94,6 +99,7 @@ export class SellerResolver {
     return this.sellerService.update(user.userId, input, false);
   }
 
+  /** Submit the caller's DRAFT profile for KYC review (DRAFT → PENDING; alerts admins). Auth: logged-in user. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Seller)
   submitMySellerForReview(
@@ -107,6 +113,7 @@ export class SellerResolver {
   // Admin verification mutations
   // ---------------------------------------------------------------------------
 
+  /** Admin creates a seller-role user + pre-VERIFIED seller record atomically. Auth: seller:create permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:create')
   @Mutation(() => Seller)
@@ -114,6 +121,7 @@ export class SellerResolver {
     return this.sellerService.adminCreate(input);
   }
 
+  /** Admin edits any seller profile, bypassing the DRAFT/REJECTED-only restriction. Auth: seller:update permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:update')
   @Mutation(() => Seller)
@@ -124,6 +132,7 @@ export class SellerResolver {
     return this.sellerService.update(user.userId, input, true);
   }
 
+  /** Mark one KYC section (PAN/GSTIN/bank/docs) verified; auto-advances to VERIFIED when all pass. Auth: seller:verify permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:verify')
   @Mutation(() => Seller)
@@ -133,6 +142,7 @@ export class SellerResolver {
     return this.sellerService.verifySection(input);
   }
 
+  /** Directly set overall seller status; enqueues the KYC approved/rejected email on genuine transitions. Auth: seller:verify permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:verify')
   @Mutation(() => Seller)
@@ -140,6 +150,7 @@ export class SellerResolver {
     return this.sellerService.setStatus(input);
   }
 
+  /** Soft-delete a seller. Auth: seller:delete permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('seller:delete')
   @Mutation(() => Seller)
@@ -151,6 +162,7 @@ export class SellerResolver {
   // Payout accounts (seller-self only)
   // ---------------------------------------------------------------------------
 
+  /** Add a payout account to the caller's own seller (seller must be VERIFIED). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => SellerPayoutAccount)
   createMyPayoutAccount(
@@ -160,6 +172,7 @@ export class SellerResolver {
     return this.sellerService.addPayoutAccount(user.userId, input);
   }
 
+  /** Update one of the caller's own payout accounts (setting primary demotes the others). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => SellerPayoutAccount)
   updateMyPayoutAccount(
@@ -169,6 +182,7 @@ export class SellerResolver {
     return this.sellerService.updatePayoutAccount(user.userId, input);
   }
 
+  /** Soft-delete one of the caller's own payout accounts. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => SellerPayoutAccount)
   removeMyPayoutAccount(

@@ -19,6 +19,7 @@ export class InventoryResolver {
   // Self (seller-managed)
   // ---------------------------------------------------------------------------
 
+  /** Seller's inventory rows across their stores, with filters (low-stock/search). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [Inventory], { name: 'myInventory' })
   myInventory(
@@ -40,6 +41,7 @@ export class InventoryResolver {
     });
   }
 
+  /** Single inventory row for a variant/warehouse; auto-creates the row on first read. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Inventory, { name: 'myInventoryByVariant', nullable: true })
   myInventoryByVariant(
@@ -55,6 +57,7 @@ export class InventoryResolver {
     );
   }
 
+  /** Paginated stock-movement audit trail for the seller's variants. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Query(() => [InventoryMovement], { name: 'myInventoryMovements' })
   myInventoryMovements(
@@ -71,6 +74,7 @@ export class InventoryResolver {
     });
   }
 
+  /** Adjusts stock by delta or absolute count; atomic, blocks negative stock, logs a movement. Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Inventory)
   adjustMyInventory(
@@ -80,6 +84,7 @@ export class InventoryResolver {
     return this.inventoryService.adjustInventory(user.userId, input);
   }
 
+  /** Sets a variant's low-stock reorder threshold (alert trigger). Auth: logged-in seller. */
   @UseGuards(JwtAuthGuard)
   @Mutation(() => Inventory)
   setMyReorderPoint(
@@ -94,6 +99,7 @@ export class InventoryResolver {
   // ---------------------------------------------------------------------------
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Cross-store inventory for a product's variants/warehouses (admin product sheet). Auth: inventory:read. */
   @Permissions('inventory:read')
   @Query(() => [Inventory], { name: 'adminInventoryByProduct' })
   adminInventoryByProduct(

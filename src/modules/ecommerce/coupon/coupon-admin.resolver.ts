@@ -15,6 +15,7 @@ import { Permissions } from '@/common/decorators/permissions.decorator';
 export class CouponAdminResolver {
   constructor(private readonly service: CouponService) {}
 
+  /** Admin lists coupons with free-text search + active/inactive/expired filter. Auth: coupon:read permission. */
   @Permissions('coupon:read')
   @Query(() => [Coupon], { name: 'adminCoupons' })
   list(
@@ -26,24 +27,28 @@ export class CouponAdminResolver {
     return this.service.list({ search, status });
   }
 
+  /** Admin fetches one coupon by id (with redemption count). Auth: coupon:read permission. */
   @Permissions('coupon:read')
   @Query(() => Coupon, { name: 'adminCoupon' })
   getById(@Args('id', { type: () => ID }) id: string) {
     return this.service.getById(id);
   }
 
+  /** Creates a coupon (code uppercased + unique; validates date range and percentage ≤ 100). Auth: coupon:create permission. */
   @Permissions('coupon:create')
   @Mutation(() => Coupon)
   createCoupon(@Args('input') input: CreateCouponInput) {
     return this.service.create(input);
   }
 
+  /** Updates a coupon's fields (re-validates date range + percentage cap). Auth: coupon:update permission. */
   @Permissions('coupon:update')
   @Mutation(() => Coupon)
   updateCoupon(@Args('input') input: UpdateCouponInput) {
     return this.service.update(input);
   }
 
+  /** Soft-deletes a coupon (also flips isActive off); returns null. Auth: coupon:delete permission. */
   @Permissions('coupon:delete')
   @Mutation(() => Coupon, { nullable: true })
   async removeCoupon(@Args('id', { type: () => ID }) id: string) {

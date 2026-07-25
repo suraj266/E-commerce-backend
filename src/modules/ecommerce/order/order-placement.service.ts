@@ -87,6 +87,9 @@ import {
   type ResolvedRate,
 } from '@/modules/ecommerce/courier/courier.service';
 import { resolveState, GST_STATES } from '@/common/constants/gst-states';
+import { OutboxService } from '@/modules/outbox/outbox.service';
+import { OUTBOX_EVENT, OUTBOX_QUEUE } from '@/modules/outbox/outbox.constants';
+import { NotificationService } from '@/modules/notification/notification.service';
 
 interface InventoryDeduction {
   inventoryId: string;
@@ -148,6 +151,13 @@ export class OrderPlacementService {
     private readonly email: EmailService,
     private readonly coupon: CouponService,
     private readonly courier: CourierService,
+    private readonly outbox: OutboxService,
+    // @Global NotificationService (P3-08). Optional trailing param so existing
+    // positional constructions in tests stay valid; Nest always injects it in
+    // the running app. Calls are guarded with `?.` and are best-effort — the
+    // in-app bell entry is a side effect of the lifecycle email and must never
+    // block/fail it. See the email senders below.
+    private readonly notifications?: NotificationService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -900,6 +910,27 @@ export class OrderPlacementService {
         if (paymentStatus !== PaymentStatus.AWAITING_PAYMENT) {
           await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
         }
+
+        // (g) Durable outbox — schedule post-placement emails to fire AFTER this
+        // transaction commits. Enqueued INSIDE the tx so the intent commits
+        // atomically with the order: a crash between commit and dispatch can no
+        // longer silently drop the customer confirmation or seller alerts (they
+        // used to be a fire-and-forget promise after commit). The relay + email
+        // worker re-read canonical state at send time.
+        await this.outbox.enqueue(tx, {
+          type: OUTBOX_EVENT.EMAIL_ORDER_PLACED,
+          queue: OUTBOX_QUEUE.EMAILS,
+          payload: { orderId },
+          dedupeKey: `email:order_placed:${orderId}`,
+        });
+        for (const so of sellerOrderRows) {
+          await this.outbox.enqueue(tx, {
+            type: OUTBOX_EVENT.EMAIL_SELLER_NEW_ORDER,
+            queue: OUTBOX_QUEUE.EMAILS,
+            payload: { sellerOrderId: so.id },
+            dedupeKey: `email:seller_new_order:${so.id}`,
+          });
+        }
       });
     } catch (err) {
       // A duplicate submit that lost the race raises P2002 on the idempotency
@@ -921,78 +952,121 @@ export class OrderPlacementService {
     }
 
     // ---- Step 6: Return the freshly hydrated parent Order ------------------
+    // Post-placement emails are NOT sent here — they were enqueued as durable
+    // OutboxEvents inside the transaction above and are sent by the outbox
+    // email worker (which calls the methods below).
     const fresh = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
-    });
-
-    // Fire-and-forget post-placement emails (customer confirmation +
-    // per-seller new-order alerts). Wrapped in try/catch — any failure here
-    // must NOT roll back the order or surface to the caller.
-    this.dispatchPlacementEmails(orderId).catch((err) => {
-      this.logger.warn(
-        `Post-placement email dispatch failed for ${orderId}: ${(err as Error).message}`,
-      );
     });
 
     return hydrateOrder(fresh);
   }
 
   // ---------------------------------------------------------------------------
-  // Post-placement email dispatch
+  // Post-placement email senders (invoked by the outbox email worker)
   // ---------------------------------------------------------------------------
 
   /**
-   * Sends `order_placed` to the customer + `seller_new_order` to each seller.
-   * Runs AFTER the placement transaction commits so emails reflect the
-   * canonical DB state. Soft-fails per-recipient — one bad address doesn't
-   * block the others.
+   * Send the `order_placed` customer confirmation. Invoked by the outbox worker
+   * for an `email.order_placed` event; re-reads canonical state by id.
+   *
+   * Throws on a genuine send failure so the outbox retries; a SKIPPED send
+   * (SMTP unconfigured / template disabled) is an intentional no-op and does
+   * NOT throw. A missing order / customer email is likewise a no-op.
    */
-  private async dispatchPlacementEmails(orderId: string): Promise<void> {
+  async sendOrderPlacedEmail(orderId: string): Promise<void> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: {
-        customer: { include: { user: true } },
-        sellerOrders: {
-          include: {
-            store: { include: { seller: { include: { user: true } } } },
-            items: true,
-          },
-        },
-      },
+      include: { customer: { include: { user: true } } },
     });
     if (!order) return;
 
-    const shopName = 'Trueway';
-    const frontendUrl = config.FRONTEND_URL ?? '';
-    const totalAmount = formatRupees(Number(order.totalAmount));
-
-    // ---- Customer confirmation ----
-    const customerEmail = order.customer?.user?.email;
-    const customerName = order.customer?.user?.name ?? 'there';
-    if (customerEmail) {
-      await this.email.send('order_placed', customerEmail, {
-        customerName,
-        orderNumber: order.orderNumber,
-        totalAmount,
-        orderLink: `${frontendUrl}/account/orders/${order.id}`,
-        shopName,
+    // In-app bell entry for the buyer, created BEFORE the send (both idempotent):
+    // if this throws, the handler retries before any mail goes out; on redelivery
+    // the dedupeKey makes it a no-op. Best-effort via `?.` so a missing service
+    // (positional test construction) simply skips it.
+    const buyerUserId = order.customer?.userId ?? null;
+    if (buyerUserId) {
+      await this.notifications?.create({
+        userId: buyerUserId,
+        type: 'order_placed',
+        title: 'Order placed',
+        body: `Your order ${order.orderNumber} has been placed.`,
+        data: {
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          totalAmount: Number(order.totalAmount),
+          link: `/account/orders/${order.id}`,
+        },
+        dedupeKey: `notif:order_placed:${order.id}`,
       });
     }
 
-    // ---- Per-seller new-order alerts ----
-    for (const so of order.sellerOrders) {
-      const sellerUser = so.store?.seller?.user;
-      if (!sellerUser?.email) continue;
-      const itemCount = so.items.reduce((s, i) => s + i.quantity, 0);
-      await this.email.send('seller_new_order', sellerUser.email, {
-        sellerName: so.store?.seller?.displayName ?? sellerUser.name,
-        orderNumber: so.orderNumber,
-        itemCount: String(itemCount),
-        subtotal: formatRupees(Number(so.subtotal)),
-        orderLink: `${frontendUrl}/seller/orders/${so.id}`,
-        shopName,
+    const customerEmail = order.customer?.user?.email;
+    if (!customerEmail) return;
+
+    const result = await this.email.send('order_placed', customerEmail, {
+      customerName: order.customer?.user?.name ?? 'there',
+      orderNumber: order.orderNumber,
+      totalAmount: formatRupees(Number(order.totalAmount)),
+      orderLink: `${config.FRONTEND_URL ?? ''}/account/orders/${order.id}`,
+    });
+    if (!result.sent && !result.skipped) {
+      throw new Error(`order_placed email failed: ${result.message}`);
+    }
+  }
+
+  /**
+   * Send one seller's `seller_new_order` alert. Invoked by the outbox worker for
+   * an `email.seller_new_order` event (one event per seller-order). Throws on a
+   * genuine send failure so the outbox retries; skips cleanly otherwise.
+   */
+  async sendSellerNewOrderEmail(sellerOrderId: string): Promise<void> {
+    const so = await this.prisma.sellerOrder.findUnique({
+      where: { id: sellerOrderId },
+      include: {
+        store: { include: { seller: { include: { user: true } } } },
+        items: true,
+      },
+    });
+    if (!so) return;
+
+    const sellerUser = so.store?.seller?.user;
+    const itemCount = so.items.reduce((s, i) => s + i.quantity, 0);
+
+    // In-app bell entry for the seller user (before the send; idempotent).
+    const sellerUserId = so.store?.seller?.userId ?? null;
+    if (sellerUserId) {
+      await this.notifications?.create({
+        userId: sellerUserId,
+        type: 'seller_new_order',
+        title: 'New order',
+        body: `You have a new order ${so.orderNumber} (${itemCount} item${
+          itemCount === 1 ? '' : 's'
+        }).`,
+        data: {
+          sellerOrderId: so.id,
+          orderNumber: so.orderNumber,
+          itemCount,
+          subtotal: Number(so.subtotal),
+          link: `/seller/orders/${so.id}`,
+        },
+        dedupeKey: `notif:seller_new_order:${so.id}`,
       });
+    }
+
+    if (!sellerUser?.email) return;
+
+    const result = await this.email.send('seller_new_order', sellerUser.email, {
+      sellerName: so.store?.seller?.displayName ?? sellerUser.name,
+      orderNumber: so.orderNumber,
+      itemCount: String(itemCount),
+      subtotal: formatRupees(Number(so.subtotal)),
+      orderLink: `${config.FRONTEND_URL ?? ''}/seller/orders/${so.id}`,
+    });
+    if (!result.sent && !result.skipped) {
+      throw new Error(`seller_new_order email failed: ${result.message}`);
     }
   }
 

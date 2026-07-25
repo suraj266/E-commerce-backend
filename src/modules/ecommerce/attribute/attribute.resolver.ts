@@ -23,7 +23,7 @@ export class AttributeResolver {
 
   /**
    * Public list — Phase B variant builder + Sprint 5 filters will use this.
-   * Includes values for each attribute. Filterable by type/variant flag.
+   * Includes values for each attribute. Filterable by type/variant flag. Public.
    */
   @Query(() => [ProductAttribute], { name: 'attributes' })
   attributes(
@@ -36,6 +36,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Admin attribute list (with values), any type. Auth: attribute:read. */
   @Permissions('attribute:read')
   @Query(() => [ProductAttribute], { name: 'adminAttributes' })
   adminAttributes(
@@ -46,6 +47,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Fetch one attribute with its values. Auth: attribute:read. */
   @Permissions('attribute:read')
   @Query(() => ProductAttribute, { name: 'attribute' })
   findOne(@Args('id', { type: () => ID }) id: string) {
@@ -57,6 +59,7 @@ export class AttributeResolver {
   // ---------------------------------------------------------------------------
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Creates a product attribute; name unique (case-insensitive). Auth: attribute:create. */
   @Permissions('attribute:create')
   @Mutation(() => ProductAttribute)
   createAttribute(
@@ -66,6 +69,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Edits an attribute; can't switch to BOOLEAN while values exist. Auth: attribute:update. */
   @Permissions('attribute:update')
   @Mutation(() => ProductAttribute)
   updateAttribute(
@@ -75,6 +79,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Soft-deletes an attribute; blocked if any variant uses it. Auth: attribute:delete. */
   @Permissions('attribute:delete')
   @Mutation(() => ProductAttribute)
   removeAttribute(@Args('id', { type: () => ID }) id: string) {
@@ -86,6 +91,7 @@ export class AttributeResolver {
   // ---------------------------------------------------------------------------
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Adds a value to an attribute (not allowed on BOOLEAN types). Auth: attribute:create. */
   @Permissions('attribute:create')
   @Mutation(() => ProductAttributeValue)
   createAttributeValue(
@@ -95,6 +101,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Edits an attribute value; value stays unique within the attribute. Auth: attribute:update. */
   @Permissions('attribute:update')
   @Mutation(() => ProductAttributeValue)
   updateAttributeValue(
@@ -104,6 +111,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Soft-deletes an attribute value; blocked if any variant uses it. Auth: attribute:delete. */
   @Permissions('attribute:delete')
   @Mutation(() => ProductAttributeValue)
   removeAttributeValue(@Args('id', { type: () => ID }) id: string) {
@@ -111,6 +119,7 @@ export class AttributeResolver {
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
+  /** Reorders an attribute's values by id list (drag-drop). Auth: attribute:update. */
   @Permissions('attribute:update')
   @Mutation(() => Boolean)
   reorderAttributeValues(

@@ -37,6 +37,25 @@ services:
       retries: 5
       start_period: 10s
 
+  # Redis — backing store for the BullMQ durable-outbox queues (P3-01). The app
+  # fails to boot if Redis is unreachable, so it must be healthy first.
+  # `appendonly yes` turns on AOF persistence so queued jobs survive a restart.
+  # For managed Redis in production, drop this service and point REDIS_URL at the
+  # provider (persistence + ACLs) — see docs/DR-RUNBOOK.md.
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce_redis_prod
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata_prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # One-shot migration runner. Uses the builder stage (has the full toolchain +
   # prisma CLI + prisma/migrations). Runs to completion and exits; the backend
   # service waits for it via `service_completed_successfully`.
@@ -68,6 +87,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     env_file:
@@ -75,6 +96,7 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public"
+      REDIS_URL: "redis://redis:6379"
     ports:
       - "${PORT}:${PORT}"
     # Only needed when IMAGE_PROVIDER=local; harmless otherwise. No source mount.
@@ -85,3 +107,4 @@ services:
 volumes:
   pgdata_prod:
   uploads_prod:
+  redisdata_prod:

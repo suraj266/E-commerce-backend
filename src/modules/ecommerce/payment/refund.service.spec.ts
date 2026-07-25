@@ -10,6 +10,7 @@ import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
 import { PaymentConfigService } from './payment-config.service';
 import { RefundService } from './refund.service';
+import { OutboxService } from '@/modules/outbox/outbox.service';
 import type { IPaymentGateway } from './gateways/payment-gateway.interface';
 
 /**
@@ -22,6 +23,7 @@ describe('RefundService', () => {
   let prisma: DeepMockProxy<PrismaService>;
   let configService: DeepMockProxy<PaymentConfigService>;
   let email: DeepMockProxy<EmailService>;
+  let outbox: DeepMockProxy<OutboxService>;
   let gateway: DeepMockProxy<IPaymentGateway>;
   let gatewayMap: Map<string, IPaymentGateway>;
 
@@ -32,6 +34,7 @@ describe('RefundService', () => {
     prisma = mockDeep<PrismaService>();
     configService = mockDeep<PaymentConfigService>();
     email = mockDeep<EmailService>();
+    outbox = mockDeep<OutboxService>();
     gateway = mockDeep<IPaymentGateway>();
     gatewayMap = new Map<string, IPaymentGateway>([['RAZORPAY', gateway]]);
     service = new RefundService(
@@ -39,6 +42,7 @@ describe('RefundService', () => {
       configService as unknown as PaymentConfigService,
       gatewayMap,
       email as unknown as EmailService,
+      outbox as unknown as OutboxService,
     );
 
     // $transaction: array form → Promise.all; callback form → run with the same
@@ -258,6 +262,35 @@ describe('RefundService', () => {
     });
   });
 
+  describe('refundForReturn — idempotent per return (no double refund on resume)', () => {
+    it('reuses the refund already linked to the return instead of creating a second', async () => {
+      prisma.payment.findFirst.mockResolvedValue(capturedPayment as never);
+      // A prior attempt already reserved + linked a refund for this return
+      // (the crash-and-resume scenario the reconciliation cron re-drives).
+      prisma.returnRequest.findUnique.mockResolvedValue({
+        refundId: 'refund-1',
+      } as never);
+      // The linked refund is already PROCESSED → approveRefund is a no-op.
+      prisma.refund.findUnique.mockResolvedValue({
+        id: 'refund-1',
+        status: RefundStatus.PROCESSED,
+        payment: capturedPayment,
+      } as never);
+
+      const res = await service.refundForReturn({
+        orderId: 'order-1',
+        sellerOrderId: 'so-1',
+        amount: 100,
+        returnRequestId: 'ret-1',
+      });
+
+      expect(res).toMatchObject({ id: 'refund-1' });
+      // The critical guarantee: NO second refund row, NO second gateway refund.
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+      expect(gateway.refund).not.toHaveBeenCalled();
+    });
+  });
+
   describe('approveRefund — the money mover', () => {
     function stubApprove(gatewayStatus: string) {
       prisma.refund.findUnique
@@ -301,7 +334,7 @@ describe('RefundService', () => {
       email.send.mockResolvedValue({ sent: true } as never);
     }
 
-    it('processes a full refund: calls the gateway once, finalizes to REFUNDED, emails the buyer', async () => {
+    it('processes a full refund: calls the gateway once, finalizes to REFUNDED, enqueues the buyer email', async () => {
       stubApprove('processed');
 
       await service.approveRefund('admin-1', 'refund-1');
@@ -317,12 +350,18 @@ describe('RefundService', () => {
       expect(payData.data.status).toBe(PaymentTransactionStatus.REFUNDED);
       // Race-safe PROCESSED flip happened.
       expect(prisma.refund.updateMany).toHaveBeenCalled();
-      // Buyer emailed.
-      expect(email.send).toHaveBeenCalledWith(
-        'order_refunded',
-        'buyer@test',
-        expect.objectContaining({ orderNumber: 'ORD-1' }),
+      // Buyer email is now DURABLE: enqueued in the finalize tx (sent by the
+      // outbox worker), not sent inline.
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        // arg0 is the tx client (=== the mocked prisma inside $transaction). A
+        // jest-mock-extended deep-mock proxy is mis-read by expect.anything()
+        // (the proxy answers every prop, so jest treats it as an asymmetric
+        // matcher). Assert the tx identity directly instead — this also proves
+        // the enqueue happened INSIDE the finalize transaction.
+        prisma,
+        expect.objectContaining({ type: 'email.order_refunded' }),
       );
+      expect(email.send).not.toHaveBeenCalled();
     });
 
     it('marks the refund FAILED and throws when the gateway refund call throws', async () => {
@@ -376,10 +415,15 @@ describe('RefundService', () => {
       await service.handleRefundWebhook({ id: 'rfnd_gw_1', status: 'processed' });
 
       expect(prisma.refund.updateMany).toHaveBeenCalled();
-      expect(email.send).toHaveBeenCalledWith(
-        'order_refunded',
-        'buyer@test',
-        expect.anything(),
+      // Buyer email enqueued durably in the finalize tx (sent by the worker).
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        // arg0 is the tx client (=== the mocked prisma inside $transaction). A
+        // jest-mock-extended deep-mock proxy is mis-read by expect.anything()
+        // (the proxy answers every prop, so jest treats it as an asymmetric
+        // matcher). Assert the tx identity directly instead — this also proves
+        // the enqueue happened INSIDE the finalize transaction.
+        prisma,
+        expect.objectContaining({ type: 'email.order_refunded' }),
       );
     });
 
@@ -414,6 +458,112 @@ describe('RefundService', () => {
 
     it('ignores an entity with no id', async () => {
       await service.handleRefundWebhook({ status: 'processed' });
+      expect(prisma.refund.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('disburseManualRefund — COD manual money loop', () => {
+    const codPayment = {
+      ...capturedPayment,
+      gateway: PaymentGateway.COD,
+      gatewayPaymentId: null,
+    };
+
+    function stubDisburse() {
+      prisma.refund.findUnique
+        // 1) disburse initial load (with payment) — REQUESTED COD refund.
+        .mockResolvedValueOnce({
+          id: 'refund-1',
+          orderId: 'order-1',
+          sellerOrderId: null,
+          amount: 100,
+          reason: 'Return / RMA',
+          restock: false,
+          status: RefundStatus.REQUESTED,
+          payment: codPayment,
+        } as never)
+        // 2) finalizeRefund re-read (with includes).
+        .mockResolvedValueOnce(
+          finalizeRefund({ payment: codPayment, restock: false }) as never,
+        )
+        // 3) disburse final re-read.
+        .mockResolvedValueOnce({
+          id: 'refund-1',
+          status: RefundStatus.PROCESSED,
+        } as never);
+      // 1st aggregate = over-refund re-check (no OTHER refunds → 0);
+      // 2nd = finalize payment-level total (this refund PROCESSED → 100 → full).
+      prisma.refund.aggregate
+        .mockResolvedValueOnce({ _sum: { amount: 0 } } as never)
+        .mockResolvedValue({ _sum: { amount: 100 } } as never);
+      prisma.sellerOrder.findMany.mockResolvedValue([
+        { id: 'so-1', status: 'REFUNDED', payoutStatus: PayoutStatus.PENDING },
+      ] as never);
+      prisma.refund.update.mockResolvedValue({ id: 'refund-1' } as never);
+      prisma.refund.updateMany.mockResolvedValue({ count: 1 } as never);
+      prisma.payment.update.mockResolvedValue({} as never);
+      prisma.sellerOrder.update.mockResolvedValue({} as never);
+      prisma.orderStatusHistory.create.mockResolvedValue({} as never);
+      prisma.order.update.mockResolvedValue({} as never);
+    }
+
+    it('finalizes a REQUESTED COD refund with no gateway call, records the UTR, and enqueues the buyer email', async () => {
+      stubDisburse();
+
+      await service.disburseManualRefund('admin-1', 'refund-1', 'UTR-99');
+
+      // No gateway is ever contacted for a manual disbursement.
+      expect(gateway.refund).not.toHaveBeenCalled();
+      // The manual reference is persisted onto the refund before finalize.
+      const upd = prisma.refund.update.mock.calls[0][0] as any;
+      expect(upd.data.gatewayResponse.manual).toBe(true);
+      expect(upd.data.gatewayResponse.reference).toBe('UTR-99');
+      // Same guarded finalize: PROCESSED flip, Payment → REFUNDED, durable email.
+      expect(prisma.refund.updateMany).toHaveBeenCalled();
+      const payData = prisma.payment.update.mock.calls[0][0] as any;
+      expect(payData.data.status).toBe(PaymentTransactionStatus.REFUNDED);
+      expect(outbox.enqueue).toHaveBeenCalledWith(
+        prisma,
+        expect.objectContaining({ type: 'email.order_refunded' }),
+      );
+    });
+
+    it('is idempotent — an already-PROCESSED refund is a no-op (no finalize, no gateway)', async () => {
+      prisma.refund.findUnique.mockResolvedValue({
+        id: 'refund-1',
+        status: RefundStatus.PROCESSED,
+        payment: codPayment,
+      } as never);
+
+      const res = await service.disburseManualRefund(
+        'admin-1',
+        'refund-1',
+        'UTR-99',
+      );
+      expect(res).toMatchObject({ id: 'refund-1' });
+      expect(prisma.refund.update).not.toHaveBeenCalled();
+      expect(prisma.refund.updateMany).not.toHaveBeenCalled();
+      expect(gateway.refund).not.toHaveBeenCalled();
+    });
+
+    it('refuses to manually disburse a gateway-backed refund', async () => {
+      prisma.refund.findUnique.mockResolvedValue({
+        id: 'refund-1',
+        status: RefundStatus.REQUESTED,
+        amount: 100,
+        payment: capturedPayment, // RAZORPAY with a gatewayPaymentId
+      } as never);
+
+      await expect(
+        service.disburseManualRefund('admin-1', 'refund-1', 'UTR-99'),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.refund.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('requires a non-empty payment reference', async () => {
+      await expect(
+        service.disburseManualRefund('admin-1', 'refund-1', '   '),
+      ).rejects.toBeInstanceOf(BadRequestException);
       expect(prisma.refund.findUnique).not.toHaveBeenCalled();
     });
   });

@@ -20,6 +20,7 @@ import { RequestRefundInput } from './dto/request-refund.input';
 export class RefundResolver {
   constructor(private readonly refundService: RefundService) {}
 
+  /** Customer requests a refund on their own order/seller-order slice; lands as REQUESTED, no money moves. Auth: logged-in customer. */
   @Mutation(() => RefundEntity, { name: 'requestRefund' })
   @UseGuards(JwtAuthGuard)
   async requestRefund(
@@ -29,6 +30,7 @@ export class RefundResolver {
     return this.refundService.requestRefund(user.userId, input);
   }
 
+  /** Lists the caller's own refunds, most recent first. Auth: logged-in customer. */
   @Query(() => [RefundEntity], { name: 'myRefunds' })
   @UseGuards(JwtAuthGuard)
   async myRefunds(@CurrentUser() user: CurrentUserPayload) {

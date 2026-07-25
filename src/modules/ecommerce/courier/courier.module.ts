@@ -3,6 +3,9 @@ import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from '@/prisma/prisma.module';
 import { CryptoService } from '@/common/crypto/crypto.service';
 import { OrderModule } from '@/modules/ecommerce/order/order.module';
+import { EmailModule } from '@/modules/admin/email/email.module';
+import { SiteSettingModule } from '@/modules/admin/site-setting/site-setting.module';
+import { ReturnsModule } from '@/modules/ecommerce/returns/returns.module';
 import { COURIER_PROVIDER_MAP, ICourierProvider } from './providers/courier-provider.interface';
 import { ShiprocketProvider } from './providers/shiprocket.provider';
 import { MockProvider } from './providers/mock.provider';
@@ -20,7 +23,18 @@ import { CourierResolver } from './courier.resolver';
  * PAYMENT_ENCRYPTION_KEY as payments).
  */
 @Module({
-  imports: [ConfigModule, PrismaModule, forwardRef(() => OrderModule)],
+  imports: [
+    ConfigModule,
+    PrismaModule,
+    forwardRef(() => OrderModule),
+    // P3-11: CourierService.sendCourierAlertEmail sends via EmailService and
+    // resolves the ops recipient from a SiteSetting. OutboxService is @Global.
+    EmailModule,
+    SiteSettingModule,
+    // P3-02: the reverse-pickup webhook correlates a scan back to a ReturnRequest
+    // via ReturnsService. forwardRef breaks the Returns↔Courier cycle.
+    forwardRef(() => ReturnsModule),
+  ],
   controllers: [CourierWebhookController],
   providers: [
     CryptoService,

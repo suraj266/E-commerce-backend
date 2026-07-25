@@ -1,7 +1,18 @@
-/// Cart — customer's active shopping cart.
+/// Cart — active shopping cart for a customer OR an anonymous guest session.
 ///
-/// One cart per Customer (auto-created on first add). FK to `Customer.id`,
-/// NOT `User.id`, per CUSTOMER_SEPARATION_PLAYBOOK.md.
+/// Ownership is exclusive: EXACTLY ONE of `customerId` / `sessionToken` is set
+/// (enforced by a DB CHECK — see migration 20260718110000_guest_cart). A
+/// customer cart FKs `Customer.id`; a guest cart is keyed only by an opaque,
+/// httpOnly-cookie `sessionToken`. On login the guest cart is merged into the
+/// customer's cart (sum/dedupe by variant, soft-fail — never blocks login) and
+/// the guest cart + cookie are discarded.
+///
+/// NOTE: `customerId` / `sessionToken` carry `@unique` here so Prisma keeps the
+/// 1-1 `Customer.cart` relation and `findUnique` lookups. The PHYSICAL indexes
+/// are PARTIAL (`WHERE ... IS NOT NULL`) so many guest carts (customerId NULL)
+/// and many customer carts (sessionToken NULL) coexist — see the hand-written
+/// migration. Prisma cannot express partial uniques; this mirrors the Phase-1
+/// pattern of DB constraints living in raw SQL.
 ///
 /// `CartItem.unitPriceSnapshot` captures the variant price at the time of
 /// add. The /cart page compares it against the live `ProductVariant.price`
@@ -15,14 +26,19 @@
 /// to 0 — keeps the unique (cartId, variantId) constraint clean.
 
 model Cart {
-  id         String  @id @default(uuid())
-  customerId String  @unique
+  id String @id @default(uuid())
+
+  /// Owner side A — the Customer this cart belongs to. Null for guest carts.
+  customerId String? @unique
+  /// Owner side B — opaque guest-session token (httpOnly cookie). Null for
+  /// customer carts. Exactly one of customerId / sessionToken is non-null.
+  sessionToken String? @unique
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  customer Customer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer Customer?  @relation(fields: [customerId], references: [id], onDelete: Cascade)
   items    CartItem[]
 }
 

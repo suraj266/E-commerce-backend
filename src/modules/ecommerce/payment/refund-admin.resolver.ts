@@ -22,6 +22,7 @@ import { RefundEntity, PaginatedRefunds } from './entities/refund.entity';
 export class RefundAdminResolver {
   constructor(private readonly refundService: RefundService) {}
 
+  /** Paginated admin list of refunds, filterable by status/order. Auth: refund:read permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('refund:read')
   @Query(() => PaginatedRefunds, { name: 'adminRefunds' })
@@ -35,6 +36,7 @@ export class RefundAdminResolver {
     return this.refundService.listRefunds({ page, pageSize, status, orderId });
   }
 
+  /** Approves + executes a gateway refund; finalizes restock and a proportional §52 TCS reversal. Idempotent. Auth: refund:approve permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('refund:approve')
   @Mutation(() => RefundEntity, { name: 'approveRefund' })
@@ -45,6 +47,7 @@ export class RefundAdminResolver {
     return this.refundService.approveRefund(user.userId, refundId);
   }
 
+  /** Declines a still-REQUESTED refund with an optional reason; no money moves. Auth: refund:reject permission. */
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions('refund:reject')
   @Mutation(() => RefundEntity, { name: 'rejectRefund' })
@@ -54,5 +57,29 @@ export class RefundAdminResolver {
     @Args('reason', { type: () => String, nullable: true }) reason?: string,
   ) {
     return this.refundService.rejectRefund(user.userId, refundId, reason);
+  }
+
+  /**
+   * Record an out-of-band (COD / no-gateway) refund disbursement — the manual
+   * money loop for COD return refunds. Finance transfers the money, then logs
+   * the UTR/reference here; the service runs the same finalize side effects the
+   * prepaid path runs (restock + TCS reversal + buyer email). refund:approve
+   * gated — it is the money-completion action.
+   */
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('refund:approve')
+  @Mutation(() => RefundEntity, { name: 'disburseManualRefund' })
+  async disburseManualRefund(
+    @CurrentUser() user: CurrentUserPayload,
+    @Args('refundId', { type: () => ID }) refundId: string,
+    @Args('reference', { type: () => String }) reference: string,
+    @Args('note', { type: () => String, nullable: true }) note?: string,
+  ) {
+    return this.refundService.disburseManualRefund(
+      user.userId,
+      refundId,
+      reference,
+      note,
+    );
   }
 }
