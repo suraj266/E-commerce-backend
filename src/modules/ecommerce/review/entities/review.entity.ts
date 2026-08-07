@@ -89,6 +89,18 @@ export class Review {
   @Field(() => [ReviewMedia])
   media: ReviewMedia[];
 
+  /**
+   * Product display name — hydrated by the customer's own-reviews list
+   * (`myReviews`) so the account page can label + link each review. Null on
+   * public / PDP reads that don't join the product.
+   */
+  @Field(() => String, { nullable: true })
+  productName?: string | null;
+
+  /** Product slug for linking to the PDP; hydrated alongside `productName`. */
+  @Field(() => String, { nullable: true })
+  productSlug?: string | null;
+
   @Field(() => Date)
   createdAt: Date;
 
@@ -120,14 +132,10 @@ export class PaginatedReviews {
  */
 @ObjectType()
 export class AdminReview extends Review {
+  // `productName` + `productSlug` are inherited from Review (hydrated here too).
+
   @Field(() => String, { nullable: true })
   customerEmail?: string | null;
-
-  @Field(() => String, { nullable: true })
-  productName?: string | null;
-
-  @Field(() => String, { nullable: true })
-  productSlug?: string | null;
 
   @Field(() => String, { nullable: true })
   hiddenReason?: string | null;

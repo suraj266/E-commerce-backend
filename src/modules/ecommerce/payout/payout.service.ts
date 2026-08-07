@@ -18,7 +18,13 @@
  * subtracts PROCESSED refunds attributed to a seller order from its net.
  */
 
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import {
   OrderStatus,
   PaymentStatus,
@@ -505,6 +511,36 @@ export class PayoutService {
   // ---------------------------------------------------------------------------
   // Reads
   // ---------------------------------------------------------------------------
+
+  /**
+   * Seller-scoped payout-run history for the caller's own settlements.
+   *
+   * Resolves the sellerId from the authenticated userId and forces it onto the
+   * list filter — the resolver never accepts a client-supplied sellerId, so a
+   * seller can only ever see their own payout runs (never another seller's).
+   * Read-only: touches no payout money logic.
+   */
+  async myPayouts(
+    userId: string,
+    opts: { status?: PayoutStatus; page?: number; pageSize?: number } = {},
+  ) {
+    const sellerId = await this.getSellerId(userId);
+    return this.listPayouts({ ...opts, sellerId });
+  }
+
+  /** Resolve the Seller for a user; throws if the caller isn't an active seller. */
+  private async getSellerId(userId: string): Promise<string> {
+    const seller = await this.prisma.seller.findUnique({
+      where: { userId },
+      select: { id: true, deletedAt: true },
+    });
+    if (!seller || seller.deletedAt) {
+      throw new ForbiddenException(
+        'Payouts are only available to seller accounts.',
+      );
+    }
+    return seller.id;
+  }
 
   async listPayouts(opts: {
     status?: PayoutStatus;

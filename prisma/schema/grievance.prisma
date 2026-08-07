@@ -1,0 +1,144 @@
+/// =============================================================================
+/// Grievance / complaint-redressal workflow (Phase 4, P4-01 — CP-EC Rules 2020).
+/// =============================================================================
+///
+/// The Consumer Protection (E-Commerce) Rules 2020 require every marketplace to
+/// run a grievance-redressal mechanism, name a Grievance Officer, acknowledge a
+/// complaint within a fixed window and resolve it within a "reasonable time",
+/// and publish a periodic compliance report. The officer CONTACT is already
+/// printed on invoices (config GRIEVANCE_OFFICER_*); THIS is the actual
+/// complaint-handling system behind it.
+///
+/// A Grievance walks a guarded state machine (see grievance.constants.ts):
+///
+///   OPEN → IN_PROGRESS → RESOLVED → CLOSED
+///   OPEN / IN_PROGRESS → ESCALATED → IN_PROGRESS → RESOLVED → CLOSED
+///   RESOLVED → IN_PROGRESS            (customer replies / re-opens)
+///
+/// Each grievance carries an SLA clock (`slaDueAt`, derived from priority — see
+/// GRIEVANCE_SLA_HOURS, // NEEDS LEGAL SIGN-OFF). A daily cron flags/escalates
+/// any OPEN/IN_PROGRESS ticket past its due date. Every customer-visible status
+/// change emits an in-app Notification + a durable outbox email.
+///
+/// GrievanceMessage rows are the append-only conversation thread (customer ⇄
+/// officer), with `internal` notes that never cross the customer boundary.
+///
+/// Idempotency + integrity (Prisma cannot model these — they live in the
+/// hand-authored migration.sql, documented here):
+///   • CHECK "grievance_message_body_not_empty": GrievanceMessage.body <> ''.
+///   • Partial INDEX "Grievance_open_sla_idx" ON (slaDueAt) WHERE status IN
+///     ('OPEN','IN_PROGRESS') — the SLA-breach cron's hot scan path.
+///
+/// No Prisma relations are declared to User / Order / SellerOrder on purpose
+/// (those models live in other schema files and a relation needs a
+/// back-reference on BOTH sides). These are plain scalar FK columns (indexed) —
+/// the same convention TcsLedger / ReturnRequest use. The parent↔child link to
+/// GrievanceMessage (which lives in THIS file) is a real relation.
+
+enum GrievanceCategory {
+  ORDER_ISSUE     /// Order not placed / wrong order / cancellation dispute.
+  DELIVERY        /// Not delivered / delayed / damaged in transit.
+  PAYMENT         /// Charged but no order / double charge / payment failure.
+  REFUND          /// Refund not received / short / delayed.
+  PRODUCT_QUALITY /// Defective / counterfeit / not-as-described item.
+  SELLER_CONDUCT  /// Seller misbehaviour / unfair trade practice.
+  DATA_PRIVACY    /// DPDP / data-handling complaint (routed with HIGH priority).
+  OTHER           /// Anything else.
+}
+
+enum GrievanceStatus {
+  OPEN        /// Filed; awaiting officer pickup.
+  IN_PROGRESS /// Officer is working it (assigned / first response given).
+  RESOLVED    /// Officer recorded a resolution; awaiting closure.
+  CLOSED      /// Terminal — resolved + closed.
+  ESCALATED   /// SLA breached or manually escalated; needs senior attention.
+}
+
+enum GrievancePriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+/// Who authored a thread message. SYSTEM = the SLA cron / automated transition.
+enum GrievanceAuthorRole {
+  CUSTOMER
+  OFFICER
+  SYSTEM
+}
+
+model Grievance {
+  id           String @id @default(uuid())
+  /// Human-readable ticket number: GRV-YYYY-MM-XXXXXXX.
+  ticketNumber String @unique
+
+  /// Complainant. Scalar FK to User (no back-relation — see header note).
+  /// Nullable so an officer can log a complaint received off-platform (phone /
+  /// email); the customer surface always sets it.
+  raisedByUserId String?
+  /// Contact fallback for notifications when there is no linked user account
+  /// (off-platform complaint) — and a human-readable name for the record.
+  contactName    String?
+  contactEmail   String?
+
+  /// Optional order context (scalar FKs — see header note).
+  orderId       String?
+  sellerOrderId String?
+
+  category    GrievanceCategory
+  subject     String
+  description String
+
+  status   GrievanceStatus   @default(OPEN)
+  priority GrievancePriority @default(NORMAL)
+
+  /// SLA deadline, derived from `priority` at file/assign time
+  /// (GRIEVANCE_SLA_HOURS — // NEEDS LEGAL SIGN-OFF). The breach cron scans this.
+  slaDueAt DateTime
+
+  /// Officer (User) currently handling the ticket. Scalar FK (see header note).
+  assignedToUserId String?
+
+  /// Free-text resolution recorded when the officer resolves the grievance.
+  resolutionNote String?
+
+  /// Lifecycle timestamps (the audit backbone alongside GrievanceMessage).
+  firstResponseAt DateTime?
+  escalatedAt     DateTime?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages GrievanceMessage[]
+
+  @@index([raisedByUserId])
+  @@index([status])
+  @@index([assignedToUserId])
+  @@index([category])
+  @@index([slaDueAt])
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+/// Append-only conversation thread on a grievance. `internal` notes are officer-
+/// only and are filtered out of the customer surface in grievance.service.ts.
+/// CHECK body <> '' lives in the migration.
+model GrievanceMessage {
+  id          String              @id @default(uuid())
+  grievanceId String
+  /// Author (User); null when authorRole = SYSTEM. Scalar FK (see header note).
+  authorUserId String?
+  authorRole  GrievanceAuthorRole
+  body        String
+  /// Officer-only internal note — never surfaced to the complainant.
+  internal    Boolean             @default(false)
+
+  createdAt DateTime @default(now())
+
+  grievance Grievance @relation(fields: [grievanceId], references: [id], onDelete: Cascade)
+
+  @@index([grievanceId, createdAt])
+}

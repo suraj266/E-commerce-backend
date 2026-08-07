@@ -1,5 +1,5 @@
 import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PayoutAdjustmentStatus, PayoutStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { EmailService } from '@/modules/admin/email/email.service';
@@ -76,6 +76,34 @@ describe('PayoutService', () => {
 
       const preview = await service.previewPayoutRun();
       expect(preview).toHaveLength(0);
+    });
+  });
+
+  describe('myPayouts — seller scoping', () => {
+    it('resolves the caller sellerId and scopes the list to it', async () => {
+      prisma.seller.findUnique.mockResolvedValue({
+        id: 'seller-1',
+        deletedAt: null,
+      } as never);
+      prisma.$transaction.mockResolvedValue([[], 0] as never);
+
+      await service.myPayouts('user-1', { page: 1, pageSize: 10 });
+
+      // The findMany used inside listPayouts must be filtered to the resolved
+      // seller — never unscoped — so a seller can't read another's payouts.
+      expect(prisma.payout.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ sellerId: 'seller-1' }),
+        }),
+      );
+    });
+
+    it('rejects a non-seller caller before listing anything', async () => {
+      prisma.seller.findUnique.mockResolvedValue(null as never);
+      await expect(service.myPayouts('user-x')).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(prisma.payout.findMany).not.toHaveBeenCalled();
     });
   });
 

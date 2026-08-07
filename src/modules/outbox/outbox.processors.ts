@@ -10,6 +10,9 @@ import { PrivacyService } from '@/modules/compliance/privacy/privacy.service';
 import { TcsService } from '@/modules/compliance/tcs/tcs.service';
 import { NewsletterService } from '@/modules/cms/newsletter/newsletter.service';
 import { ReturnsService } from '@/modules/ecommerce/returns/returns.service';
+import { GrievanceService } from '@/modules/compliance/grievance/grievance.service';
+import { BackInStockService } from '@/modules/notification/back-in-stock.service';
+import { NOTIFICATION_OUTBOX_EVENT } from '@/modules/notification/notification.constants';
 import { OUTBOX_EVENT, OUTBOX_QUEUE } from './outbox.constants';
 import {
   OutboxExecutionService,
@@ -106,6 +109,12 @@ export class EmailsProcessor extends WorkerHost {
     private readonly tcs: TcsService,
     private readonly newsletter: NewsletterService,
     private readonly returns: ReturnsService,
+    // P4 (CP-EC grievance): status/reply/filed lifecycle emails + in-app bell.
+    private readonly grievance: GrievanceService,
+    // P4 (notification depth): wishlist back-in-stock alert. Optional trailing
+    // param — BackInStockService is a @Global NotificationModule export, so it
+    // resolves at runtime; `?` keeps positional construction safe.
+    private readonly backInStock?: BackInStockService,
   ) {
     super();
   }
@@ -175,6 +184,28 @@ export class EmailsProcessor extends WorkerHost {
           await this.returns.sendReturnReplacementShippedEmail(
             event.payload.returnId,
           );
+          return;
+        case OUTBOX_EVENT.EMAIL_GRIEVANCE_FILED:
+          // P4 (CP-EC): complaint filed → acknowledge to the complainant.
+          await this.grievance.sendGrievanceFiledEmail(event.payload.grievanceId);
+          return;
+        case OUTBOX_EVENT.EMAIL_GRIEVANCE_STATUS:
+          await this.grievance.sendGrievanceStatusEmail(
+            event.payload.grievanceId,
+            event.payload.status,
+            event.payload.occurrence,
+          );
+          return;
+        case OUTBOX_EVENT.EMAIL_GRIEVANCE_REPLY:
+          await this.grievance.sendGrievanceReplyEmail(
+            event.payload.grievanceId,
+            event.payload.messageId,
+          );
+          return;
+        case NOTIFICATION_OUTBOX_EVENT.BACK_IN_STOCK:
+          // P4 (notification depth): wishlist restock alert — in-app bell
+          // (auto-fans SMS/push) + email. Routed on the EMAILS queue.
+          await this.backInStock?.sendBackInStockAlert(event.payload);
           return;
         default:
           throw new Error(`Unknown emails outbox type: ${event.type}`);

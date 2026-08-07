@@ -18,6 +18,7 @@ import {
   VariantAxis,
 } from './entities/product-variant.entity';
 import { SearchSuggestions } from './entities/search-suggestion.entity';
+import { DeliveryEstimate } from './entities/delivery-estimate.entity';
 import { SetVariantAxesInput } from './dto/set-variant-axes.input';
 import { GenerateVariantMatrixInput } from './dto/generate-variant-matrix.input';
 import { CreateVariantInput } from './dto/create-variant.input';
@@ -275,7 +276,7 @@ export class ProductResolver {
 
   /**
    * Header autocomplete. Returns up to `limit` light-weight product rows
-   * matching the term. The full /search page uses paginatedPublicProducts. Public.
+   * matching the term. The full /search page uses searchProducts. Public.
    */
   @Query(() => SearchSuggestions, { name: 'searchSuggestions' })
   searchSuggestions(
@@ -283,6 +284,55 @@ export class ProductResolver {
     @Args('limit', { type: () => Int, nullable: true }) limit?: number,
   ) {
     return this.productService.searchSuggestions({ q, limit });
+  }
+
+  /**
+   * Full-text product search backing /search — Postgres `websearch_to_tsquery`
+   * ranking over the product's weighted search vector + brand name, with the
+   * shop facets (category descendants / price / brand) and pagination. Sort
+   * defaults to relevance. Public.
+   */
+  @Query(() => PaginatedProducts, { name: 'searchProducts' })
+  searchProducts(
+    @Args('query', { type: () => String }) query: string,
+    @Args('categorySlug', { type: () => String, nullable: true })
+    categorySlug?: string,
+    @Args('brandSlug', { type: () => String, nullable: true }) brandSlug?: string,
+    @Args('minPrice', { type: () => Float, nullable: true }) minPrice?: number,
+    @Args('maxPrice', { type: () => Float, nullable: true }) maxPrice?: number,
+    @Args('sort', { type: () => ProductSortOrder, nullable: true })
+    sort?: ProductSortOrder,
+    @Args('page', { type: () => Int, nullable: true }) page?: number,
+    @Args('pageSize', { type: () => Int, nullable: true }) pageSize?: number,
+  ) {
+    return this.productService.searchProducts({
+      query,
+      categorySlug,
+      brandSlug,
+      minPrice,
+      maxPrice,
+      sort,
+      page,
+      pageSize,
+    });
+  }
+
+  /**
+   * Storefront delivery estimate: product/variant → pincode. Reuses the live
+   * courier serviceability (read-only) and degrades to the in-house shipping
+   * config. Pass exactly one of productId / variantId. Public.
+   */
+  @Query(() => DeliveryEstimate, { name: 'deliveryEstimate' })
+  deliveryEstimate(
+    @Args('pincode', { type: () => String }) pincode: string,
+    @Args('productId', { type: () => ID, nullable: true }) productId?: string,
+    @Args('variantId', { type: () => ID, nullable: true }) variantId?: string,
+  ) {
+    return this.productService.deliveryEstimate({
+      pincode,
+      productId,
+      variantId,
+    });
   }
 
   // ---------------------------------------------------------------------------

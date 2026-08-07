@@ -271,6 +271,28 @@ export class ReviewService {
   // Customer reads
   // ---------------------------------------------------------------------------
 
+  /**
+   * The caller's own reviews, newest first, for the account "My reviews" page.
+   * Scoped to the resolved customerId — never trusts a client-supplied id.
+   * Hydrates productName + productSlug so the list can label + link each row.
+   */
+  async myReviews(userId: string) {
+    const customerId = await this.getCustomerId(userId);
+    const rows = await this.prisma.review.findMany({
+      where: { customerId, deletedAt: null },
+      include: {
+        ...REVIEW_INCLUDE,
+        product: { select: { name: true, slug: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    return rows.map((r) => ({
+      ...this.hydrate(r),
+      productName: r.product?.name ?? null,
+      productSlug: r.product?.slug ?? null,
+    }));
+  }
+
   /** Returns the caller's review for `productId`, if any. */
   async myReview(userId: string, productId: string) {
     const customerId = await this.getCustomerId(userId);

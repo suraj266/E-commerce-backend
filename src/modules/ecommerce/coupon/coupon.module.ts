@@ -10,9 +10,15 @@ import { Module } from '@nestjs/common';
 import { CouponService } from './coupon.service';
 import { CouponAdminResolver } from './coupon-admin.resolver';
 import { CouponCustomerResolver } from './coupon-customer.resolver';
+import { CouponSellerResolver } from './coupon-seller.resolver';
 
 @Module({
-  providers: [CouponService, CouponAdminResolver, CouponCustomerResolver],
+  providers: [
+    CouponService,
+    CouponAdminResolver,
+    CouponCustomerResolver,
+    CouponSellerResolver,
+  ],
   exports: [CouponService],
 })
 export class CouponModule {}

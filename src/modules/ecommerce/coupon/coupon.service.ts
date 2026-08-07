@@ -22,6 +22,7 @@
 
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -243,6 +244,132 @@ export class CouponService {
       data: { deletedAt: new Date(), isActive: false },
     });
     return { id, deleted: true };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Seller-scoped CRUD (ownership-checked)
+  //
+  // The admin CRUD above is permission-gated but NOT ownership-scoped, so a
+  // seller must never call it. These wrappers resolve the caller → seller and
+  // assert the target store/coupon belongs to a store that seller owns BEFORE
+  // delegating to the shared create/update/softDelete. Ownership is enforced
+  // here in the service (not just filtered in the resolver query) so a forged
+  // id can never reach another seller's data.
+  // ---------------------------------------------------------------------------
+
+  /** Resolve the Seller for a user; throws if the caller isn't an active seller. */
+  private async getSellerId(userId: string): Promise<string> {
+    const seller = await this.prisma.seller.findUnique({
+      where: { userId },
+      select: { id: true, deletedAt: true },
+    });
+    if (!seller || seller.deletedAt) {
+      throw new ForbiddenException(
+        'Store coupons are only available to seller accounts.',
+      );
+    }
+    return seller.id;
+  }
+
+  /** Assert `storeId` exists and is owned by `sellerId`. */
+  private async assertStoreOwnership(
+    sellerId: string,
+    storeId: string,
+  ): Promise<void> {
+    const store = await this.prisma.store.findUnique({
+      where: { id: storeId },
+      select: { sellerId: true, deletedAt: true },
+    });
+    if (!store || store.deletedAt) {
+      throw new NotFoundException('Store not found.');
+    }
+    if (store.sellerId !== sellerId) {
+      throw new ForbiddenException('You do not own this store.');
+    }
+  }
+
+  /**
+   * Assert the coupon exists, is store-scoped, and its store belongs to
+   * `sellerId`. Platform-wide coupons (storeId null) are never a seller's to
+   * touch. Returns the coupon row.
+   */
+  private async assertCouponOwnership(sellerId: string, couponId: string) {
+    const coupon = await this.prisma.coupon.findUnique({
+      where: { id: couponId },
+    });
+    if (!coupon || coupon.deletedAt) {
+      throw new NotFoundException('Coupon not found.');
+    }
+    if (!coupon.storeId) {
+      throw new ForbiddenException('You do not have access to this coupon.');
+    }
+    await this.assertStoreOwnership(sellerId, coupon.storeId);
+    return coupon;
+  }
+
+  /**
+   * List coupons across the caller's own stores. When `storeId` is given, it
+   * must be one the caller owns (asserted) and the list is scoped to it.
+   */
+  async listForSeller(userId: string, storeId?: string | null) {
+    const sellerId = await this.getSellerId(userId);
+    const ownedStores = await this.prisma.store.findMany({
+      where: { sellerId, deletedAt: null },
+      select: { id: true },
+    });
+    const ownedStoreIds = ownedStores.map((s) => s.id);
+    if (ownedStoreIds.length === 0) return [];
+
+    let scopeIds = ownedStoreIds;
+    if (storeId) {
+      if (!ownedStoreIds.includes(storeId)) {
+        throw new ForbiddenException('You do not own this store.');
+      }
+      scopeIds = [storeId];
+    }
+
+    const rows = await this.prisma.coupon.findMany({
+      where: { deletedAt: null, storeId: { in: scopeIds } },
+      orderBy: [{ isActive: 'desc' }, { validUntil: 'asc' }],
+      include: { _count: { select: { redemptions: true } } },
+    });
+    return rows.map(this.toSafeShape);
+  }
+
+  /** Create a coupon scoped to one of the caller's own stores. */
+  async createForSeller(userId: string, input: CreateCouponInput) {
+    const sellerId = await this.getSellerId(userId);
+    if (!input.storeId) {
+      throw new BadRequestException(
+        'A store is required — sellers can only create store-scoped coupons.',
+      );
+    }
+    await this.assertStoreOwnership(sellerId, input.storeId);
+    return this.create(input);
+  }
+
+  /** Update one of the caller's own store coupons. */
+  async updateForSeller(userId: string, input: UpdateCouponInput) {
+    const sellerId = await this.getSellerId(userId);
+    await this.assertCouponOwnership(sellerId, input.id);
+    // A seller may only re-scope a coupon to another store they own, and can
+    // never detach it to platform-wide.
+    if (input.storeId !== undefined) {
+      if (!input.storeId) {
+        throw new ForbiddenException(
+          'Store coupons must stay attached to one of your stores.',
+        );
+      }
+      await this.assertStoreOwnership(sellerId, input.storeId);
+    }
+    return this.update(input);
+  }
+
+  /** Soft-delete one of the caller's own store coupons. */
+  async softDeleteForSeller(userId: string, id: string) {
+    const sellerId = await this.getSellerId(userId);
+    await this.assertCouponOwnership(sellerId, id);
+    return this.softDelete(id);
   }
 
   // ---------------------------------------------------------------------------

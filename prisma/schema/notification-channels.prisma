@@ -1,0 +1,86 @@
+/// =============================================================================
+/// Notification channels — Web-Push subscriptions + back-in-stock alert ledger
+/// (Phase 4, notification depth). Additive-only.
+/// =============================================================================
+///
+/// Companion models for the SMS + Web-Push channel expansion (which otherwise
+/// needs no schema — SMS targets User.phone, and consent reuses
+/// Customer.marketingOptIn) and the wishlist back-in-stock alert.
+///
+/// Like the Notification / audit / TCS ledgers, these use PLAIN SCALAR foreign
+/// keys (userId / customerId / variantId / wishlistItemId) with NO Prisma
+/// relation, so this additive migration never edits user.prisma /
+/// customer.prisma / wishlist.prisma / product.prisma from a parallel
+/// workstream. Referential cleanup is handled in application code (unregister
+/// on the client; the back-in-stock sweep re-reads live wishlist state each run
+/// and self-heals stale ledger rows).
+
+/// A browser Web-Push registration — one row per browser/device push endpoint.
+///
+/// Written by `registerPushSubscription` after the client calls
+/// `PushManager.subscribe(...)`. `endpoint` is the push-service URL and is
+/// globally UNIQUE (a browser mints one endpoint per subscription), so
+/// re-subscribing the same browser UPSERTs this row rather than duplicating it.
+/// `p256dh` + `auth` are the client public key + auth secret (base64url)
+/// required to encrypt the payload per RFC 8291. Delivery uses VAPID (the
+/// WEB_PUSH channel adapter); when VAPID_* env is unset the channel degrades to
+/// a logged no-op, exactly like EmailService without SMTP.
+model PushSubscription {
+  id String @id @default(uuid())
+
+  /// Owning user id (scalar, no relation — see file note).
+  userId String
+
+  /// Push-service endpoint URL. UNIQUE = the upsert handle (one row per
+  /// browser/device); re-registering refreshes the keys in place.
+  endpoint String @unique
+
+  /// Client public key (base64url — `keys.p256dh` from the browser subscription).
+  p256dh String
+  /// Client auth secret (base64url — `keys.auth`).
+  auth String
+
+  /// Optional User-Agent captured at register time (device management / debug).
+  userAgent String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Fan-out read path: all of a user's live endpoints.
+  @@index([userId])
+}
+
+/// Dedupe + re-arm ledger for the wishlist back-in-stock alert.
+///
+/// ONE row exists per wishlist item WHILE its wishlisted variant/product is
+/// known in-stock AND the alert has already fired. The sweep cron
+/// (`BackInStockService.runSweep`):
+///   - INSERTs a row (createMany + skipDuplicates → ON CONFLICT DO NOTHING) the
+///     first time it observes an armed item back in stock, and enqueues the
+///     durable alert ONLY when the insert actually wrote a row (count > 0) — so a
+///     redelivered/overlapping sweep never double-alerts.
+///   - DELETEs the row once it later observes the item OUT of stock again,
+///     RE-ARMING the next 0→in-stock transition (a fresh row carries a fresh
+///     `id`, which drives new, non-colliding outbox + notification dedupe keys so
+///     a later restock legitimately re-alerts).
+model BackInStockAlert {
+  id String @id @default(uuid())
+
+  /// The wishlist item this alert is for. UNIQUE = the dedupe unit: one live
+  /// alert per wishlist item per restock cycle.
+  wishlistItemId String @unique
+
+  /// The specific in-stock variant that triggered the alert (NULL when the
+  /// wishlist item is whole-product and we alert on any active variant).
+  variantId String?
+
+  /// Denormalised alert targets captured at fire time (scalar, no relation).
+  productId  String
+  customerId String
+  userId     String
+
+  alertedAt DateTime @default(now())
+
+  /// Ops/debug read path: alerts for a given variant.
+  @@index([variantId])
+}

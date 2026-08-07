@@ -470,6 +470,64 @@ const templates = [
     isEnabled: true,
     isSystem: false,
   },
+
+  // ---- Phase 4 ----
+  {
+    key: 'grievance_filed',
+    name: 'Grievance filed (acknowledgement)',
+    description:
+      'CP-EC: acknowledges to the complainant that their grievance was received, with the ticket number.',
+    category: 'SYSTEM' as const,
+    subject: 'We received your complaint — ticket {{ticketNumber}}',
+    htmlBody: `<h2 style="margin:0 0 16px;font-size:20px;">Complaint received</h2>
+<p>Thanks for reaching out. Your complaint <strong>{{ticketNumber}}</strong> — "{{subject}}" — has been logged and our grievance team will respond within our published SLA.</p>
+<p style="margin:24px 0;"><a href="{{grievanceLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">Track your complaint</a></p>`,
+    variables: ['ticketNumber', 'subject', 'grievanceLink', 'shopName'],
+    isEnabled: true,
+    isSystem: true,
+  },
+  {
+    key: 'grievance_status',
+    name: 'Grievance status update',
+    description: 'CP-EC: notifies the complainant when their grievance status changes.',
+    category: 'SYSTEM' as const,
+    subject: 'Update on your complaint {{ticketNumber}}',
+    htmlBody: `<h2 style="margin:0 0 16px;font-size:20px;">Complaint update</h2>
+<p>There's an update on your complaint <strong>{{ticketNumber}}</strong> — "{{subject}}".</p>
+<p style="margin:16px 0;padding:12px 16px;border-left:3px solid #6366f1;background:#eef2ff;">{{message}}</p>
+<p style="margin:24px 0;"><a href="{{grievanceLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">View complaint</a></p>`,
+    variables: ['ticketNumber', 'subject', 'message', 'grievanceLink', 'shopName'],
+    isEnabled: true,
+    isSystem: true,
+  },
+  {
+    key: 'grievance_reply',
+    name: 'Grievance reply',
+    description: 'CP-EC: notifies the complainant that the grievance team replied on their ticket.',
+    category: 'SYSTEM' as const,
+    subject: 'New reply on your complaint {{ticketNumber}}',
+    htmlBody: `<h2 style="margin:0 0 16px;font-size:20px;">New reply</h2>
+<p>Our team replied to your complaint <strong>{{ticketNumber}}</strong>:</p>
+<p style="margin:16px 0;padding:12px 16px;border-left:3px solid #6366f1;background:#eef2ff;">{{message}}</p>
+<p style="margin:24px 0;"><a href="{{grievanceLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">Reply / view thread</a></p>`,
+    variables: ['ticketNumber', 'message', 'grievanceLink', 'shopName'],
+    isEnabled: true,
+    isSystem: true,
+  },
+  {
+    key: 'back_in_stock',
+    name: 'Back in stock (wishlist alert)',
+    description:
+      'Notifies a customer that a wishlisted product is available again. Marketing-class — gated on marketing consent by the send path.',
+    category: 'NEWSLETTER' as const,
+    subject: '{{productName}} is back in stock',
+    htmlBody: `<h2 style="margin:0 0 16px;font-size:20px;">Good news, {{customerName}}!</h2>
+<p><strong>{{productName}}</strong> from your wishlist is available again — grab it before it sells out.</p>
+<p style="margin:24px 0;"><a href="{{productLink}}" style="display:inline-block;padding:12px 24px;background:#18181b;color:#fff;text-decoration:none;border-radius:6px;font-weight:500;">View product</a></p>`,
+    variables: ['customerName', 'productName', 'productLink', 'shopName'],
+    isEnabled: true,
+    isSystem: false,
+  },
 ];
 
 async function main() {

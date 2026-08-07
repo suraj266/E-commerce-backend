@@ -250,6 +250,20 @@ export class PaymentService {
 
     // Create payment session with gateway (reusing the prior gateway order id
     // when we found a reusable payment).
+    // Gateway checkout prefill. Razorpay REQUIRES a contact number + email for
+    // every payment; passing them here is what makes it skip its "Contact
+    // details" step instead of asking the buyer for data we already hold.
+    //
+    // Phone: the shipping address is the better source — it's mandatory at
+    // checkout, whereas User.phone is nullable — so fall back to the account
+    // phone only when the address has none. An undefined value is simply
+    // omitted from the prefill (the gateway spreads conditionally), which
+    // degrades to today's behaviour rather than sending an empty string.
+    const buyer = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true, phone: true },
+    });
+
     const session = await gateway.createSession({
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -257,6 +271,9 @@ export class PaymentService {
       currency,
       method: orderPaymentMethod,
       description: `Order ${order.orderNumber}`,
+      customerEmail: buyer?.email ?? undefined,
+      customerPhone: order.shippingAddress?.phone ?? buyer?.phone ?? undefined,
+      customerName: buyer?.name ?? undefined,
       existingGatewayOrderId: reusable?.gatewayOrderId ?? undefined,
     });
 

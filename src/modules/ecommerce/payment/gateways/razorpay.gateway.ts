@@ -152,16 +152,71 @@ export class RazorpayGateway implements IPaymentGateway {
     }
 
     const amountInPaise = Math.round(input.amount * 100);
-    const refund = await this.client.payments.refund(input.gatewayPaymentId, {
-      amount: amountInPaise,
-      notes: {
-        reason: input.reason ?? 'Customer refund',
-      },
-    });
+    try {
+      const refund = await this.client.payments.refund(input.gatewayPaymentId, {
+        amount: amountInPaise,
+        notes: {
+          reason: input.reason ?? 'Customer refund',
+        },
+      });
 
-    return {
-      refundId: refund.id,
-      status: refund.status,
-    };
+      return {
+        refundId: refund.id,
+        status: refund.status,
+      };
+    } catch (err) {
+      // The SDK rejects with a PLAIN OBJECT ({ statusCode, error: {...} }), not
+      // an Error — so a caller reading `.message` gets `undefined` and the real
+      // reason ("payment already refunded", "amount exceeds", bad key) is lost.
+      // Normalise it to a real Error here, at the boundary that knows the shape.
+      throw new Error(describeRazorpayError(err));
+    }
   }
+}
+
+/**
+ * Turn whatever the Razorpay SDK rejected with into a human sentence.
+ * Handles the documented error envelope, a genuine Error, and anything else.
+ */
+export function describeRazorpayError(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as {
+      error?: {
+        description?: string;
+        code?: string;
+        reason?: string;
+        field?: string;
+        source?: string;
+        step?: string;
+      };
+      statusCode?: number;
+      message?: string;
+    };
+    const inner = e.error;
+    if (inner?.description) {
+      const code = inner.code ? ` [${inner.code}]` : '';
+      const reason =
+        inner.reason && inner.reason !== 'NA' ? ` (${inner.reason})` : '';
+      // Razorpay's generic "invalid request sent" is useless on its own; these
+      // three fields are what actually identify the offending parameter.
+      const detail = [
+        inner.field ? `field=${inner.field}` : null,
+        inner.source && inner.source !== 'NA' ? `source=${inner.source}` : null,
+        inner.step && inner.step !== 'NA' ? `step=${inner.step}` : null,
+      ]
+        .filter(Boolean)
+        .join(', ');
+      return `${inner.description}${reason}${code}${detail ? ` — ${detail}` : ''}`;
+    }
+    if (e.message) return e.message;
+    if (e.statusCode) return `Razorpay returned HTTP ${e.statusCode}.`;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* fall through to the generic message below */
+    }
+  }
+  return typeof err === 'string' && err
+    ? err
+    : 'Razorpay rejected the request without a description.';
 }

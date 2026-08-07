@@ -1,6 +1,7 @@
 import { mockDeep, DeepMockProxy } from 'jest-mock-extended';
 import { BadRequestException } from '@nestjs/common';
 import {
+  OrderStatus,
   PaymentGateway,
   PaymentTransactionStatus,
   PayoutStatus,
@@ -586,6 +587,196 @@ describe('RefundService', () => {
         pageSize: 10,
       });
       expect(res).toMatchObject({ totalCount: 1, currentPage: 1, pageSize: 10 });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Seller-initiated cancellation refund
+  // ---------------------------------------------------------------------------
+
+  describe('seller-initiated cancellation refund', () => {
+    const SELLER_ID = 'seller-1';
+    const SELLER_USER_ID = 'seller-user-1';
+
+    /**
+     * A CANCELLED slice worth 60 on a captured payment of 100 — i.e. a
+     * multi-seller order where this seller owns only part of the payment. The
+     * gap between 60 and 100 is what the slice cap has to defend.
+     */
+    function stubSellerSlice(overrides: Record<string, unknown> = {}) {
+      prisma.seller.findUnique.mockResolvedValue({ id: SELLER_ID } as never);
+      prisma.sellerOrder.findUnique.mockResolvedValue({
+        id: 'so-1',
+        orderId: 'order-1',
+        sellerId: SELLER_ID,
+        storeId: 'store-1',
+        orderNumber: 'SORD-1',
+        currencyCode: 'INR',
+        status: OrderStatus.CANCELLED,
+        payoutStatus: PayoutStatus.PENDING,
+        subtotal: 60,
+        taxAmount: 0,
+        shippingAmount: 0,
+        discountAmount: 0,
+        deletedAt: null,
+        ...overrides,
+      } as never);
+      prisma.payment.findFirst.mockResolvedValue(capturedPayment as never);
+      prisma.refund.aggregate.mockResolvedValue({
+        _sum: { amount: 0 },
+      } as never);
+    }
+
+    /** Short-circuits approveRefund via its already-PROCESSED idempotent branch. */
+    function stubApproveIsNoop() {
+      prisma.refund.create.mockResolvedValue({
+        id: 'refund-1',
+        amount: 60,
+        reason: 'Order cancelled by seller',
+      } as never);
+      prisma.refund.findUnique.mockResolvedValue({
+        id: 'refund-1',
+        status: RefundStatus.PROCESSED,
+        payment: capturedPayment,
+      } as never);
+    }
+
+    it('refuses to refund a slice the caller does not own', async () => {
+      stubSellerSlice({ sellerId: 'someone-else' });
+      await expect(
+        service.createSellerRefund(SELLER_USER_ID, { sellerOrderId: 'so-1' }),
+      ).rejects.toThrow(/do not own/i);
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses when the caller is not a seller account', async () => {
+      prisma.seller.findUnique.mockResolvedValue(null as never);
+      await expect(
+        service.createSellerRefund(USER_ID, { sellerOrderId: 'so-1' }),
+      ).rejects.toThrow(/seller accounts/i);
+    });
+
+    it('refuses to refund an order that is not CANCELLED', async () => {
+      stubSellerSlice({ status: OrderStatus.CONFIRMED });
+      await expect(
+        service.createSellerRefund(SELLER_USER_ID, { sellerOrderId: 'so-1' }),
+      ).rejects.toThrow(/cancelled/i);
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a COD order (no online payment was taken)', async () => {
+      stubSellerSlice();
+      prisma.payment.findFirst.mockResolvedValue({
+        ...capturedPayment,
+        gateway: PaymentGateway.COD,
+        gatewayPaymentId: null,
+      } as never);
+      await expect(
+        service.createSellerRefund(SELLER_USER_ID, { sellerOrderId: 'so-1' }),
+      ).rejects.toThrow(/cash-on-delivery/i);
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses once the slice is in a payout run', async () => {
+      stubSellerSlice({ payoutStatus: PayoutStatus.PAID });
+      await expect(
+        service.createSellerRefund(SELLER_USER_ID, { sellerOrderId: 'so-1' }),
+      ).rejects.toThrow(/payout/i);
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+    });
+
+    it('caps the amount at the seller OWN slice, not the whole captured payment', async () => {
+      stubSellerSlice(); // slice = 60, payment = 100
+      // Asking for the full payment amount must be refused — 40 of it belongs
+      // to another seller on the same order.
+      await expect(
+        service.createSellerRefund(SELLER_USER_ID, {
+          sellerOrderId: 'so-1',
+          amount: 100,
+        }),
+      ).rejects.toThrow(/exceeds the refundable amount/i);
+      expect(prisma.refund.create).not.toHaveBeenCalled();
+    });
+
+    it('defaults the amount to the slice ceiling and never restocks (cancel already did)', async () => {
+      stubSellerSlice();
+      stubApproveIsNoop();
+
+      await service.createSellerRefund(SELLER_USER_ID, {
+        sellerOrderId: 'so-1',
+      });
+
+      expect(prisma.refund.create).toHaveBeenCalledTimes(1);
+      const arg = prisma.refund.create.mock.calls[0][0] as any;
+      expect(Number(arg.data.amount)).toBe(60); // slice total, not payment total
+      expect(arg.data.sellerOrderId).toBe('so-1');
+      expect(arg.data.requestedById).toBe(SELLER_USER_ID);
+      expect(arg.data.status).toBe(RefundStatus.REQUESTED);
+      // The double-restock guard: the cancel path already wrote `order_cancel`
+      // movements, so this refund must NOT restock the same units again.
+      expect(arg.data.restock).toBe(false);
+    });
+
+    it('accepts a seller-lowered partial amount', async () => {
+      stubSellerSlice();
+      stubApproveIsNoop();
+
+      await service.createSellerRefund(SELLER_USER_ID, {
+        sellerOrderId: 'so-1',
+        amount: 25,
+        reason: 'Partial — shipping already incurred',
+      });
+
+      const arg = prisma.refund.create.mock.calls[0][0] as any;
+      expect(Number(arg.data.amount)).toBe(25);
+      expect(arg.data.reason).toBe('Partial — shipping already incurred');
+    });
+
+    it('subtracts refunds already booked on the slice from the ceiling', async () => {
+      stubSellerSlice();
+      // 50 of the 60 slice is already refunded → only 10 left.
+      prisma.refund.aggregate.mockResolvedValue({
+        _sum: { amount: 50 },
+      } as never);
+
+      await expect(
+        service.createSellerRefund(SELLER_USER_ID, {
+          sellerOrderId: 'so-1',
+          amount: 20,
+        }),
+      ).rejects.toThrow(/exceeds the refundable amount/i);
+    });
+
+    describe('preview', () => {
+      it('reports a blockedReason instead of throwing when not refundable', async () => {
+        stubSellerSlice({ status: OrderStatus.DELIVERED });
+        prisma.refund.findMany.mockResolvedValue([] as never);
+
+        const res = await service.getSellerRefundPreview(
+          SELLER_USER_ID,
+          'so-1',
+        );
+        expect(res.refundable).toBe(false);
+        expect(res.blockedReason).toMatch(/cancelled/i);
+      });
+
+      it('returns the slice breakdown + ceiling for a refundable order', async () => {
+        stubSellerSlice();
+        prisma.refund.findMany.mockResolvedValue([] as never);
+
+        const res = await service.getSellerRefundPreview(
+          SELLER_USER_ID,
+          'so-1',
+        );
+        expect(res).toMatchObject({
+          refundable: true,
+          blockedReason: null,
+          sliceTotal: 60,
+          alreadyRefunded: 0,
+          maxRefundable: 60,
+          paymentGateway: PaymentGateway.RAZORPAY,
+        });
+      });
     });
   });
 });

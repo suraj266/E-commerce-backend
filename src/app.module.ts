@@ -65,6 +65,7 @@ import { HttpMetricsInterceptor } from './modules/observability/metrics/http-met
 // Compliance modules
 import { PrivacyModule } from './modules/compliance/privacy/privacy.module';
 import { TcsModule } from './modules/compliance/tcs/tcs.module';
+import { GrievanceModule } from './modules/compliance/grievance/grievance.module';
 
 
 @Module({
@@ -161,6 +162,11 @@ import { TcsModule } from './modules/compliance/tcs/tcs.module';
     // (payment/refund/payout/seller-order) inject TcsService without importing
     // it. Accrual/reversal/netting; GSTR-8/GSTR-1 export. NEEDS CA SIGN-OFF.
     TcsModule,
+    // Grievance / complaint-redressal workflow (P4-01, CP-EC Rules 2020). Ticket
+    // lifecycle + SLA-breach escalation cron + monthly compliance report. Exports
+    // GrievanceService for the outbox EmailsProcessor (grievance.* handlers —
+    // CENTRAL-WIRING). NEEDS LEGAL SIGN-OFF on SLA windows + report filing cadence.
+    GrievanceModule,
   ],
   controllers: [AppController],
   providers: [

@@ -26,6 +26,7 @@ import { CourierModule } from '@/modules/ecommerce/courier/courier.module';
 import { PrivacyModule } from '@/modules/compliance/privacy/privacy.module';
 import { NewsletterModule } from '@/modules/cms/newsletter/newsletter.module';
 import { ReturnsModule } from '@/modules/ecommerce/returns/returns.module';
+import { GrievanceModule } from '@/modules/compliance/grievance/grievance.module';
 
 /**
  * OutboxModule — the CONSUMER half of the durable outbox (P3-01).
@@ -72,6 +73,10 @@ import { ReturnsModule } from '@/modules/ecommerce/returns/returns.module';
     // ReturnsService. ReturnsModule pulls in OutboxCoreModule (@Global) for
     // OutboxService — never OutboxModule — so the edge stays one-way.
     ReturnsModule,
+    // P4 (CP-EC grievance): EmailsProcessor dispatches the grievance_* handlers
+    // on GrievanceService. GrievanceModule uses the @Global OutboxCoreModule —
+    // never OutboxModule — so the edge stays one-way.
+    GrievanceModule,
   ],
   providers: [
     redisClientProvider,

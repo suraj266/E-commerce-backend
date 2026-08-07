@@ -9,10 +9,11 @@ import { Module } from '@nestjs/common';
 import { EmailModule } from '@/modules/admin/email/email.module';
 import { PayoutService } from './payout.service';
 import { PayoutAdminResolver } from './payout-admin.resolver';
+import { PayoutSellerResolver } from './payout-seller.resolver';
 
 @Module({
   imports: [EmailModule],
-  providers: [PayoutService, PayoutAdminResolver],
+  providers: [PayoutService, PayoutAdminResolver, PayoutSellerResolver],
   exports: [PayoutService],
 })
 export class PayoutModule {}

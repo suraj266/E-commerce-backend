@@ -17,6 +17,7 @@ import {
   RequestPasswordResetDto,
   ResetPasswordDto,
 } from './dto/password-reset.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import {
   AdminVerifyEmailDto,
   ResendVerificationDto,
@@ -641,6 +642,76 @@ export class AuthService {
     ]);
 
     return { message: 'Password updated. You can now sign in.' };
+  }
+
+  // ========================
+  // IN-ACCOUNT PASSWORD CHANGE
+  // ========================
+  /**
+   * Change the password for a LOGGED-IN user. Proves ownership by verifying
+   * the CURRENT password (argon2), then writes the new hash and revokes EVERY
+   * existing session + refresh token (all devices) via `revokeAllSessions` — a
+   * password change must invalidate anything minted under the old credential,
+   * including the caller's own now-stale refresh token. A fresh session is then
+   * minted for THIS device so the caller stays signed in while every OTHER
+   * device is logged out (the controller sets the rotated cookie).
+   *
+   * Additive: reuses the existing `revokeAllSessions` + token-generation
+   * helpers and touches no other auth internals.
+   */
+  async changePassword(
+    userId: string,
+    input: ChangePasswordDto,
+  ): Promise<{ accessToken: string; refreshToken: string; message: string }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    // The JwtAuthGuard already proved a valid token; a missing user here means
+    // the account was deleted mid-session — treat as unauthorized.
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const isMatch = await verify(user.password, input.currentPassword);
+    if (!isMatch) {
+      throw new BadRequestException('Current password is incorrect');
+    }
+
+    // Reject a no-op change — the point is to rotate the secret.
+    const sameAsOld = await verify(user.password, input.newPassword);
+    if (sameAsOld) {
+      throw new BadRequestException(
+        'New password must be different from the current one',
+      );
+    }
+
+    const passwordHash = await hash(input.newPassword);
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { password: passwordHash },
+    });
+
+    // Sign the user out everywhere (incl. the current stale refresh token)...
+    await this.revokeAllSessions(user.id);
+
+    // ...then mint a brand-new session for this device so the caller isn't
+    // abruptly logged out of the surface they just changed the password on.
+    const accessToken = this.generateAccessToken(user.id, user.email);
+    const refreshToken = this.generateRefreshToken(user.id, user.email);
+    const hashedRefreshToken = await hash(refreshToken);
+    await this.prisma.refreshToken.create({
+      data: {
+        token: hashedRefreshToken,
+        userId: user.id,
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+      },
+    });
+
+    this.logger.log(
+      `Password changed for user ${user.id}; all other sessions revoked.`,
+    );
+
+    return {
+      accessToken,
+      refreshToken,
+      message: 'Password updated. You have been signed out of other devices.',
+    };
   }
 
   // ========================

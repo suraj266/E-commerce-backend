@@ -87,6 +87,17 @@ model Product {
   unitsSold30d     Int           @default(0)
   lastSoldAt       DateTime?
 
+  /// Full-text search vector (P4-B). A STORED GENERATED column created and
+  /// maintained ENTIRELY by migration 20260724010000_product_fts — Postgres
+  /// recomputes it from name/shortDescription/seoKeywords/description on every
+  /// write, and a GIN index backs `websearch_to_tsquery` ranking in
+  /// ProductService.searchProducts. Declared here only so the client is aware
+  /// the column exists; it is DB-managed, never read or written by app code
+  /// (Prisma omits Unsupported columns from results). DO NOT set it in any
+  /// create/update — the value is derived. See the migration for the weighting
+  /// and the immutability constraints on the generated expression.
+  searchVector     Unsupported("tsvector")?
+
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
   deletedAt        DateTime?

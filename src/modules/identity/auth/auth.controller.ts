@@ -12,6 +12,7 @@ import {
     ResendVerificationDto,
     VerifyEmailDto,
 } from "./dto/verify-email.dto";
+import { ChangePasswordDto } from "./dto/change-password.dto";
 import { JwtAuthGuard } from "./jwt-auth.guard";
 import { Permissions } from "@/common/decorators/permissions.decorator";
 import { PermissionsGuard } from "@/common/guards/permissions.guard";
@@ -180,5 +181,36 @@ export class AuthController {
         res.clearCookie('refreshToken', { path: '/', domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined });
 
         return result;
+    }
+
+    /**
+     * POST /auth/change-password — a logged-in user rotates their own password.
+     * Proves ownership with the current password, revokes every OTHER session,
+     * and issues a fresh session for THIS device (cookie rotated below, new
+     * access token returned). Auth: logged-in user.
+     */
+    @Post('change-password')
+    @HttpCode(200)
+    @UseGuards(JwtAuthGuard)
+    async changePassword(
+        @Req() req: any,
+        @Body() input: ChangePasswordDto,
+        @Res({ passthrough: true }) res: Response,
+    ) {
+        const result = await this.authService.changePassword(req.user.userId, input);
+
+        // Rotate the refresh-token cookie onto the freshly-minted session (the
+        // old one was just revoked). Options mirror login/refresh exactly.
+        res.cookie('refreshToken', result.refreshToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+            path: '/',
+            domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined,
+        });
+
+        // Never return the refresh token in the body — it lives only in the cookie.
+        return { accessToken: result.accessToken, message: result.message };
     }
 }

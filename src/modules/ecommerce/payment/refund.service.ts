@@ -50,6 +50,7 @@ import {
   type IPaymentGateway,
 } from './gateways/payment-gateway.interface';
 import { RequestRefundInput } from './dto/request-refund.input';
+import { CreateSellerRefundInput } from './dto/create-seller-refund.input';
 import { OutboxService } from '@/modules/outbox/outbox.service';
 import { OUTBOX_EVENT, OUTBOX_QUEUE } from '@/modules/outbox/outbox.constants';
 import { AuditService } from '@/modules/observability/audit/audit.service';
@@ -60,6 +61,36 @@ import { MetricsService } from '@/modules/observability/metrics/metrics.service'
 /** Rounds to 2dp — money is Decimal(10,2); we compare in major units. */
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * Best-effort message for anything a gateway SDK throws.
+ *
+ * Gateway SDKs reject with plain objects as often as with Errors (Razorpay
+ * rejects with `{ statusCode, error: { description, code } }`), so reading
+ * `.message` blindly stores the literal string "undefined" as the failure
+ * reason — which is exactly the information an operator needs and can't get.
+ */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (err && typeof err === 'object') {
+    const e = err as {
+      error?: { description?: string; code?: string };
+      message?: string;
+    };
+    if (e.error?.description) {
+      return e.error.code
+        ? `${e.error.description} [${e.error.code}]`
+        : e.error.description;
+    }
+    if (e.message) return e.message;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* fall through */
+    }
+  }
+  return typeof err === 'string' && err ? err : 'Unknown gateway error.';
 }
 
 /** Small tolerance for float compares against a Decimal-derived total. */
@@ -291,6 +322,229 @@ export class RefundService {
   }
 
   // ---------------------------------------------------------------------------
+  // Seller-initiated cancellation refund
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Read-only assessment of what THIS seller may refund on THIS slice, plus the
+   * reason when they may not. Shared by the preview query (renders the reason)
+   * and the create mutation (throws on it), so the dialog can never offer an
+   * action the mutation would reject.
+   *
+   * The ceiling is the MINIMUM of two independent limits:
+   *   - payment remaining : captured amount − all PROCESSING/PROCESSED refunds
+   *                         on the parent payment (the existing over-refund rail)
+   *   - slice remaining   : this sub-order's own total − what's already been
+   *                         refunded against it
+   * The slice limit is what stops one seller in a multi-seller order from
+   * refunding another seller's share of the same captured payment.
+   */
+  private async assessSellerRefund(
+    so: {
+      id: string;
+      orderId: string;
+      status: OrderStatus;
+      payoutStatus: PayoutStatus;
+      subtotal: Prisma.Decimal;
+      taxAmount: Prisma.Decimal;
+      shippingAmount: Prisma.Decimal;
+      discountAmount: Prisma.Decimal;
+    },
+    /**
+     * Runs on the caller's transaction when there is one, so the re-check inside
+     * `createSellerRefund`'s FOR UPDATE lock reads on the SAME connection that
+     * holds the lock (rather than racing it from a second one).
+     */
+    client: Prisma.TransactionClient | PrismaService = this.prisma,
+  ) {
+    const sliceTotal = this.sellerOrderTotal(so);
+
+    const sliceAgg = await client.refund.aggregate({
+      where: {
+        sellerOrderId: so.id,
+        status: { in: [RefundStatus.PROCESSING, RefundStatus.PROCESSED] },
+      },
+      _sum: { amount: true },
+    });
+    const alreadyRefunded = round2(Number(sliceAgg._sum.amount ?? 0));
+
+    const payment = await client.payment.findFirst({
+      where: {
+        orderId: so.orderId,
+        status: PaymentTransactionStatus.CAPTURED,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let paymentRemaining = 0;
+    if (payment) {
+      const paymentAgg = await client.refund.aggregate({
+        where: {
+          paymentId: payment.id,
+          status: { in: [RefundStatus.PROCESSING, RefundStatus.PROCESSED] },
+        },
+        _sum: { amount: true },
+      });
+      paymentRemaining = round2(
+        Number(payment.amount) - Number(paymentAgg._sum.amount ?? 0),
+      );
+    }
+    const sliceRemaining = round2(sliceTotal - alreadyRefunded);
+    const maxRefundable = Math.max(
+      0,
+      round2(Math.min(paymentRemaining, sliceRemaining)),
+    );
+
+    // First matching rule wins — ordered most-specific first so the seller sees
+    // the actionable reason, not a generic one.
+    let blockedReason: string | null = null;
+    if (so.status !== OrderStatus.CANCELLED) {
+      blockedReason =
+        'Only a cancelled order can be refunded from here. Cancel the order first.';
+    } else if (!payment) {
+      blockedReason =
+        'No captured payment exists for this order — there is nothing to refund.';
+    } else if (
+      payment.gateway === PaymentGateway.COD ||
+      !payment.gatewayPaymentId
+    ) {
+      blockedReason =
+        'This was a Cash-on-Delivery order — no online payment was taken, so there is nothing to refund.';
+    } else if (
+      so.payoutStatus === PayoutStatus.PROCESSING ||
+      so.payoutStatus === PayoutStatus.PAID
+    ) {
+      blockedReason =
+        'This order is already in a payout run or paid out. Contact support — the money has to be recovered as a clawback.';
+    } else if (maxRefundable <= 0) {
+      blockedReason = 'This order has already been fully refunded.';
+    }
+
+    return {
+      payment,
+      sliceTotal,
+      alreadyRefunded,
+      maxRefundable,
+      blockedReason,
+    };
+  }
+
+  /**
+   * Everything the seller's refund dialog renders. Never throws for a
+   * business-rule block — it returns `refundable: false` + `blockedReason`.
+   * Ownership is still enforced hard (a seller cannot preview someone else's
+   * order).
+   */
+  async getSellerRefundPreview(userId: string, sellerOrderId: string) {
+    const so = await this.loadOwnedSellerOrder(userId, sellerOrderId);
+    const assessment = await this.assessSellerRefund(so);
+
+    const refunds = await this.prisma.refund.findMany({
+      where: { sellerOrderId: so.id },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      sellerOrderId: so.id,
+      orderNumber: so.orderNumber,
+      currencyCode: so.currencyCode,
+      subtotal: Number(so.subtotal),
+      taxAmount: Number(so.taxAmount),
+      shippingAmount: Number(so.shippingAmount),
+      discountAmount: Number(so.discountAmount),
+      sliceTotal: assessment.sliceTotal,
+      alreadyRefunded: assessment.alreadyRefunded,
+      maxRefundable: assessment.maxRefundable,
+      refundable: assessment.blockedReason === null,
+      blockedReason: assessment.blockedReason,
+      paymentGateway: assessment.payment?.gateway ?? null,
+      refunds,
+    };
+  }
+
+  /**
+   * Seller refunds the buyer for their own cancelled sub-order. This EXECUTES —
+   * it creates the Refund and immediately drives the guarded `approveRefund`,
+   * so the money leaves through the gateway in the same call. There is no admin
+   * approval step by design; the seller is the one who cancelled.
+   *
+   * Two things make this safe to hand to a seller account:
+   *   - the amount is capped at their OWN slice (see assessSellerRefund), so a
+   *     seller can never refund another seller's share of a shared payment;
+   *   - `restock: false` is forced. The cancel path already returned this
+   *     slice's stock via `order_cancel` movements, and finalizeRefund's restock
+   *     gate only looks for prior `order_refund` movements — so a restocking
+   *     refund here would return the same units to inventory TWICE.
+   *
+   * Concurrency: the ceiling re-check and the Refund insert run inside one
+   * transaction behind a `FOR UPDATE` lock on the sub-order row (same pattern as
+   * returns.service.ts / invoice.service.ts), so two rapid clicks can't each
+   * pass a stale ceiling check and over-refund the slice.
+   */
+  async createSellerRefund(userId: string, input: CreateSellerRefundInput) {
+    const so = await this.loadOwnedSellerOrder(userId, input.sellerOrderId);
+
+    const refund = await this.prisma.$transaction(async (tx) => {
+      // Serialise concurrent refund creation on this slice.
+      await tx.$queryRaw`SELECT id FROM "SellerOrder" WHERE id = ${so.id} FOR UPDATE`;
+
+      // Re-assess INSIDE the lock — the numbers may have moved since the dialog
+      // was opened (another refund, a payout run starting).
+      const { payment, maxRefundable, blockedReason } =
+        await this.assessSellerRefund(so, tx);
+      if (blockedReason) throw new BadRequestException(blockedReason);
+      // Narrowing only — assessSellerRefund already blocks on a missing payment.
+      if (!payment) {
+        throw new BadRequestException(
+          'No captured payment exists for this order to refund.',
+        );
+      }
+
+      const amount = round2(input.amount ?? maxRefundable);
+      if (amount <= 0) {
+        throw new BadRequestException(
+          'Refund amount must be greater than zero.',
+        );
+      }
+      if (amount > maxRefundable + EPSILON) {
+        throw new BadRequestException(
+          `Refund of ${amount} exceeds the refundable amount of ${maxRefundable} for this order.`,
+        );
+      }
+
+      return tx.refund.create({
+        data: {
+          orderId: so.orderId,
+          sellerOrderId: so.id,
+          paymentId: payment.id,
+          amount: new Prisma.Decimal(amount),
+          reason: input.reason?.trim() || 'Order cancelled by seller',
+          restock: false, // cancel already restocked — see the doc block above
+          status: RefundStatus.REQUESTED,
+          requestedById: userId,
+        },
+      });
+    });
+
+    // Trail the seller's decision separately from the generic approve trail, so
+    // an audit can tell a seller-driven refund from a finance-driven one.
+    await this.audit?.record({
+      action: 'refund.seller_initiated',
+      entityType: 'Refund',
+      entityId: refund.id,
+      actorUserId: userId,
+      before: { sellerOrderId: so.id, sellerOrderStatus: so.status },
+      after: { amount: Number(refund.amount), reason: refund.reason },
+    });
+
+    // Execute. approveRefund is the single money path — PROCESSING before the
+    // gateway call, guarded exactly-once finalize (payment/order status, §52 TCS
+    // reversal, durable buyer email + bell), idempotent on re-entry.
+    const finalized = await this.approveRefund(userId, refund.id);
+    return finalized ?? refund;
+  }
+
+  // ---------------------------------------------------------------------------
   // Admin — money movers
   // ---------------------------------------------------------------------------
 
@@ -376,20 +630,19 @@ export class RefundService {
         reason: refund.reason ?? undefined,
       });
     } catch (err) {
+      const reason = errorMessage(err);
       await this.prisma.refund.update({
         where: { id: refund.id },
         data: {
           status: RefundStatus.FAILED,
-          failureReason: (err as Error).message?.slice(0, 500),
+          failureReason: reason.slice(0, 500),
         },
       });
       this.logger.error(
-        `Gateway refund failed for refund ${refund.id} (order ${refund.orderId}): ${(err as Error).message}`,
+        `Gateway refund failed for refund ${refund.id} (order ${refund.orderId}): ${reason}`,
       );
       this.metrics?.recordRefundProcessed('failed');
-      throw new BadRequestException(
-        `Gateway refund failed: ${(err as Error).message}`,
-      );
+      throw new BadRequestException(`Gateway refund failed: ${reason}`);
     }
 
     // Persist the gatewayRefundId immediately so an async webhook can correlate
@@ -1132,6 +1385,30 @@ export class RefundService {
         Number(so.shippingAmount) -
         Number(so.discountAmount),
     );
+  }
+
+  /**
+   * Load a sub-order the caller actually owns as a seller. Both failure modes
+   * are hard: a non-seller account and someone else's order.
+   */
+  private async loadOwnedSellerOrder(userId: string, sellerOrderId: string) {
+    const seller = await this.prisma.seller.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+    if (!seller) {
+      throw new ForbiddenException('Only seller accounts can refund an order.');
+    }
+    const so = await this.prisma.sellerOrder.findUnique({
+      where: { id: sellerOrderId },
+    });
+    if (!so || so.deletedAt) {
+      throw new NotFoundException('Seller order not found.');
+    }
+    if (so.sellerId !== seller.id) {
+      throw new ForbiddenException('You do not own this order.');
+    }
+    return so;
   }
 
   private async getCustomerId(userId: string): Promise<string> {

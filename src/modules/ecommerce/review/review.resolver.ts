@@ -48,6 +48,13 @@ export class ReviewResolver {
   // Customer-authenticated
   // ---------------------------------------------------------------------------
 
+  /** The caller's own reviews, newest first, for the account "My reviews" page. Auth: logged-in customer. */
+  @UseGuards(JwtAuthGuard)
+  @Query(() => [Review], { name: 'myReviews' })
+  myReviews(@CurrentUser() user: CurrentUserPayload) {
+    return this.service.myReviews(user.userId);
+  }
+
   /** The caller's own review for a product, if any. Auth: logged-in customer. */
   @UseGuards(JwtAuthGuard)
   @Query(() => Review, { name: 'myReview', nullable: true })

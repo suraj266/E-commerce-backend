@@ -19,6 +19,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
 import { NotificationEntity } from './entities/notification.entity';
+import { NotificationDispatchService } from './channels/notification-dispatch.service';
 
 export interface CreateNotificationInput {
   /** Recipient user id (the principal whose bell this shows in). */
@@ -56,20 +57,37 @@ function toJson(value: unknown): Prisma.InputJsonValue | undefined {
 
 @Injectable()
 export class NotificationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Phase 4: fans the SAME notification out to SMS + Web-Push. OPTIONAL
+    // trailing param (guarded with `?.`) so unit tests can construct
+    // NotificationService with just Prisma; at runtime the NotificationModule
+    // always provides it. Unconfigured channels make it a near-zero no-op.
+    private readonly dispatch?: NotificationDispatchService,
+  ) {}
 
   /**
    * Insert one notification, idempotently on `dedupeKey`. Accepts an optional
    * transaction client so a caller can write the notification atomically with
    * its business state; defaults to the base client for the (common) worker
    * callsite that runs outside a transaction.
+   *
+   * Phase 4 channel fan-out: after the bell write, the SAME notification is
+   * fanned to SMS + Web-Push — but ONLY when
+   *   (a) there is NO transaction (`tx` undefined): external I/O must never run
+   *       inside a DB transaction that might still roll back; AND
+   *   (b) the bell row was NEWLY inserted (`createMany` count > 0): this reuses
+   *       the existing `dedupeKey` so a redelivered outbox job that re-runs a
+   *       lifecycle handler doesn't re-send SMS/push — the second create is a
+   *       no-op (count 0) and skips the fan-out for free.
+   * The fan-out is best-effort (never throws), mirroring EmailService.
    */
   async create(
     input: CreateNotificationInput,
     tx?: Prisma.TransactionClient,
   ): Promise<void> {
     const client: Prisma.TransactionClient = tx ?? this.prisma;
-    await client.notification.createMany({
+    const res = await client.notification.createMany({
       data: [
         {
           userId: input.userId,
@@ -82,6 +100,10 @@ export class NotificationService {
       ],
       skipDuplicates: true,
     });
+
+    if (!tx && res.count > 0) {
+      await this.dispatch?.fanOut(input);
+    }
   }
 
   /** The principal's feed, newest first. */

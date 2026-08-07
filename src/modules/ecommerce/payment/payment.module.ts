@@ -43,6 +43,7 @@ import { RefundService } from './refund.service';
 import { PaymentResolver } from './payment.resolver';
 import { PaymentAdminResolver } from './payment-admin.resolver';
 import { RefundResolver } from './refund.resolver';
+import { RefundSellerResolver } from './refund-seller.resolver';
 import { RefundAdminResolver } from './refund-admin.resolver';
 import { PaymentWebhookController } from './payment-webhook.controller';
 import { PaymentReconciliationCron } from './payment-reconciliation.cron';
@@ -79,6 +80,7 @@ import { PaymentReconciliationCron } from './payment-reconciliation.cron';
     PaymentResolver,
     PaymentAdminResolver,
     RefundResolver,
+    RefundSellerResolver,
     RefundAdminResolver,
     PaymentReconciliationCron,
   ],

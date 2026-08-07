@@ -138,6 +138,9 @@ const permissions = [
     { module: "apikey", action: "manage", description: "Create and revoke programmatic API keys" },
     // Newsletter broadcast (Phase 3 Wave 4 — consent-gated marketing send)
     { module: "newsletter", action: "send", description: "Compose and send newsletter broadcast campaigns" },
+    // Grievance / CP-EC compliance (Phase 4 — complaint redressal + monthly report)
+    { module: "grievance", action: "read", description: "Read grievances + monthly CP-EC compliance report" },
+    { module: "grievance", action: "manage", description: "Act on grievances — assign, respond, resolve, escalate, close" },
     // Invoices (Phase 1 — admin can force-regenerate a tax invoice PDF)
     { module: "invoice", action: "manage", description: "Regenerate seller-order tax invoices (admin override)" },
     // Labels (product badges — manual + auto/rule-based)

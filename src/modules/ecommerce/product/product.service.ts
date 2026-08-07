@@ -3,9 +3,18 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { Prisma, ProductStatus, ProductType } from '@prisma/client';
 import { PrismaService } from '@/prisma/prisma.service';
+import { CourierService } from '@/modules/ecommerce/courier/courier.service';
+import {
+  computeSellerShipping,
+  isCodEligible,
+  isServiceable,
+  isValidPincode,
+  parseShippingConfig,
+} from '@/modules/ecommerce/shipping/shipping-rate';
 import {
   computePriceWithTax,
   computeTaxAmount,
@@ -144,11 +153,47 @@ function hydrate(p: any) {
   };
 }
 
+/**
+ * Conservative fallback windows (in days) for the storefront delivery estimate
+ * when no LIVE courier ETA is available. Deliberately zone-agnostic — the
+ * in-house engine has no pincode-distance model, so we present a wide, honest
+ * window rather than a false-precision single date. Order placement re-derives
+ * the authoritative figure.
+ */
+const DEFAULT_DISPATCH_DAYS = 1;
+const IN_HOUSE_TRANSIT_MIN_DAYS = 3;
+const IN_HOUSE_TRANSIT_MAX_DAYS = 6;
+/** Padding on top of a LIVE courier ETA to express a range rather than a point. */
+const LIVE_TRANSIT_VARIANCE_DAYS = 1;
+
+/** Plain shape returned by `deliveryEstimate` (maps 1:1 to the DeliveryEstimate entity). */
+export interface DeliveryEstimateShape {
+  pincode: string;
+  serviceable: boolean;
+  estimatedDispatchDays: number | null;
+  minDeliveryDays: number | null;
+  maxDeliveryDays: number | null;
+  rateSource: string;
+  courierName: string | null;
+  shippingCharge: number | null;
+  freeShipping: boolean;
+  codAvailable: boolean;
+  message: string | null;
+}
+
 @Injectable()
 export class ProductService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly inventoryService: InventoryService,
+    // P4-B: read-only reuse of the LIVE courier serviceability/ETA for the
+    // storefront delivery estimator. Optional + @Optional so any positional
+    // construction (and the existing spec) stays valid; Nest injects it via
+    // CourierModule in the running app. This service NEVER mutates courier
+    // state — it only calls resolveSellerRate (which itself never throws and
+    // returns null → graceful in-house fallback).
+    @Optional()
+    private readonly courier?: CourierService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -1082,6 +1127,327 @@ export class ProductService {
         imageUrl: p.images[0]?.imageUrl ?? null,
         brandName: p.brand?.name ?? null,
       })),
+    };
+  }
+
+  /**
+   * Full-text product search (P4-B). Ranks with `websearch_to_tsquery` against
+   * the `Product.searchVector` generated column (weighted name/short-desc/
+   * keywords/description) and additionally ORs a brand-name text match, so a
+   * query like "samsung" surfaces products whose brand is Samsung even when the
+   * name omits it. Respects the same published/active/soft-delete gate as the
+   * rest of the storefront and supports the shop facets (category descendants +
+   * price range + brand) so /search can filter without re-implementing them.
+   *
+   * Prisma can't model tsvector/ts_rank, so the ranked-id + count pass is raw
+   * SQL; we then hydrate the page through the normal Prisma include so the
+   * GraphQL shape (pricing, labels, variants) matches every other product list.
+   */
+  async searchProducts(args: {
+    query: string;
+    categorySlug?: string;
+    brandSlug?: string;
+    minPrice?: number;
+    maxPrice?: number;
+    sort?: ProductSortOrder;
+    page?: number;
+    pageSize?: number;
+  }) {
+    const term = (args.query ?? '').trim();
+    const page = Math.max(1, args.page ?? 1);
+    const pageSize = Math.min(Math.max(args.pageSize ?? 12, 1), 60);
+    const offset = (page - 1) * pageSize;
+
+    const empty = {
+      items: [] as ReturnType<typeof hydrate>[],
+      totalCount: 0,
+      totalPages: 1,
+      currentPage: page,
+      pageSize,
+    };
+    // Mirror the autocomplete threshold — a 1-char query is too broad to rank.
+    if (term.length < 2) return empty;
+
+    // Category browse expects descendants too (same walk the catalog uses). An
+    // unknown/inactive category slug yields an empty id list → no rows.
+    let categoryIds: string[] | null = null;
+    if (args.categorySlug) {
+      categoryIds = await this.buildCategoryDescendantFilter(args.categorySlug);
+      if (!categoryIds || categoryIds.length === 0) return empty;
+    }
+
+    // Composable WHERE fragments (bound params throughout — no interpolation of
+    // user input). Enum literals ('ACTIVE') are constants, safe to inline.
+    const conditions: Prisma.Sql[] = [
+      Prisma.sql`p."deletedAt" IS NULL`,
+      Prisma.sql`p."status" = 'ACTIVE'`,
+      Prisma.sql`s."status" = 'ACTIVE'`,
+      Prisma.sql`s."deletedAt" IS NULL`,
+      Prisma.sql`(p."searchVector" @@ q.tsq OR to_tsvector('english', coalesce(b."name", '')) @@ q.tsq)`,
+    ];
+    if (args.brandSlug) {
+      conditions.push(Prisma.sql`b."slug" = ${args.brandSlug}`);
+    }
+    if (categoryIds) {
+      conditions.push(
+        Prisma.sql`p."categoryId" IN (${Prisma.join(categoryIds)})`,
+      );
+    }
+    if (args.minPrice != null || args.maxPrice != null) {
+      const priceConds: Prisma.Sql[] = [Prisma.sql`v."deletedAt" IS NULL`];
+      if (args.minPrice != null)
+        priceConds.push(Prisma.sql`v."price" >= ${args.minPrice}`);
+      if (args.maxPrice != null)
+        priceConds.push(Prisma.sql`v."price" <= ${args.maxPrice}`);
+      conditions.push(
+        Prisma.sql`EXISTS (SELECT 1 FROM "ProductVariant" v WHERE v."productId" = p."id" AND ${Prisma.join(
+          priceConds,
+          ' AND ',
+        )})`,
+      );
+    }
+    const whereSql = Prisma.join(conditions, ' AND ');
+
+    // The shared relevance score: product-vector rank + brand-name rank.
+    const rankSql = Prisma.sql`(ts_rank(p."searchVector", q.tsq) + ts_rank(to_tsvector('english', coalesce(b."name", '')), q.tsq))`;
+
+    let orderSql: Prisma.Sql;
+    switch (args.sort) {
+      case ProductSortOrder.PRICE_ASC:
+        orderSql = Prisma.sql`p."basePrice" ASC NULLS LAST, search_rank DESC`;
+        break;
+      case ProductSortOrder.PRICE_DESC:
+        orderSql = Prisma.sql`p."basePrice" DESC NULLS LAST, search_rank DESC`;
+        break;
+      case ProductSortOrder.NEWEST:
+        orderSql = Prisma.sql`p."createdAt" DESC`;
+        break;
+      default:
+        // Relevance (default): best rank first, newest as the tiebreak.
+        orderSql = Prisma.sql`search_rank DESC, p."createdAt" DESC`;
+    }
+
+    // Shared FROM + WHERE. The parsed tsquery is cross-joined once and exposed
+    // as the single column `q.tsq` (the explicit column alias matters: a bare
+    // function alias would resolve to a whole-row record, not the scalar).
+    const fromSql = Prisma.sql`
+      FROM "Product" p
+      JOIN "Store" s ON s."id" = p."storeId"
+      LEFT JOIN "Brand" b ON b."id" = p."brandId"
+      CROSS JOIN websearch_to_tsquery('english', ${term}) AS q(tsq)
+      WHERE ${whereSql}`;
+
+    const [rows, countRows] = await this.prisma.$transaction([
+      this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        SELECT p."id", ${rankSql} AS search_rank
+        ${fromSql}
+        ORDER BY ${orderSql}
+        LIMIT ${pageSize} OFFSET ${offset}`),
+      this.prisma.$queryRaw<{ count: number }[]>(Prisma.sql`
+        SELECT COUNT(*)::int AS count
+        ${fromSql}`),
+    ]);
+
+    const totalCount = Number(countRows[0]?.count ?? 0);
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) {
+      return {
+        ...empty,
+        totalCount,
+        totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+      };
+    }
+
+    // Hydrate the page through the normal include, then restore rank order
+    // (findMany does not preserve the `IN (...)` order).
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: ids } },
+      include: PRODUCT_INCLUDE,
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const ordered = ids
+      .map((id) => byId.get(id))
+      .filter((p): p is (typeof products)[number] => p != null);
+
+    return {
+      items: ordered.map(hydrate),
+      totalCount,
+      totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+      currentPage: page,
+      pageSize,
+    };
+  }
+
+  /**
+   * Storefront delivery estimate for a product/variant → pincode (P4-B).
+   *
+   * Reuses the SAME serviceability the checkout uses (read-only): tries a LIVE
+   * per-seller courier rate via CourierService.resolveSellerRate (which yields
+   * an ETA in days and never throws), and degrades gracefully to the in-house
+   * `Store.shippingConfig` (flat engine + dispatch SLA) when there's no live
+   * rate. Purely indicative — placement re-derives the binding figure.
+   */
+  async deliveryEstimate(args: {
+    pincode: string;
+    productId?: string | null;
+    variantId?: string | null;
+  }): Promise<DeliveryEstimateShape> {
+    const pin = (args.pincode ?? '').trim();
+    if (!isValidPincode(pin)) {
+      throw new BadRequestException('Enter a valid 6-digit Indian pincode.');
+    }
+    if (!args.productId && !args.variantId) {
+      throw new BadRequestException('Provide a productId or variantId.');
+    }
+
+    // Resolve the product + its store + a representative weight/price. Either a
+    // variant (preferred, precise weight) or a product (uses its cheapest
+    // active variant for the declared value + weight fallback).
+    let store: {
+      id: string;
+      status: string;
+      deletedAt: Date | null;
+      shippingConfig: Prisma.JsonValue;
+      sellerId: string;
+    } | null = null;
+    let weight: number | null = null;
+    let declaredValue = 0;
+    let productStatus: ProductStatus | null = null;
+    let productDeleted = false;
+
+    if (args.variantId) {
+      const variant = await this.prisma.productVariant.findUnique({
+        where: { id: args.variantId },
+        include: { product: { include: { store: true } } },
+      });
+      if (!variant || variant.deletedAt) {
+        throw new NotFoundException('Variant not found.');
+      }
+      const product = variant.product;
+      store = product.store;
+      productStatus = product.status;
+      productDeleted = !!product.deletedAt;
+      weight =
+        variant.weight != null
+          ? Number(variant.weight)
+          : product.weight != null
+            ? Number(product.weight)
+            : null;
+      declaredValue = Number(variant.price);
+    } else {
+      const product = await this.prisma.product.findUnique({
+        where: { id: args.productId as string },
+        include: {
+          store: true,
+          variants: {
+            where: { deletedAt: null },
+            orderBy: { price: 'asc' },
+            take: 1,
+          },
+        },
+      });
+      if (!product || product.deletedAt) {
+        throw new NotFoundException('Product not found.');
+      }
+      store = product.store;
+      productStatus = product.status;
+      productDeleted = !!product.deletedAt;
+      const cheapest = product.variants[0];
+      weight =
+        product.weight != null
+          ? Number(product.weight)
+          : cheapest?.weight != null
+            ? Number(cheapest.weight)
+            : null;
+      declaredValue =
+        product.basePrice != null
+          ? Number(product.basePrice)
+          : cheapest
+            ? Number(cheapest.price)
+            : 0;
+    }
+
+    // Only estimate for a live, purchasable listing (mirrors findPublic gate).
+    if (
+      !store ||
+      productDeleted ||
+      productStatus !== ProductStatus.ACTIVE ||
+      store.status !== 'ACTIVE' ||
+      store.deletedAt
+    ) {
+      throw new NotFoundException('Product not available.');
+    }
+
+    const config = parseShippingConfig(store.shippingConfig);
+    const inhouse = computeSellerShipping({
+      items: [{ weight, qty: 1 }],
+      merchandiseSubtotal: declaredValue,
+      config,
+    });
+    const serviceable = isServiceable(config, pin);
+    const dispatchDays = config.processingDays ?? DEFAULT_DISPATCH_DAYS;
+
+    if (!serviceable) {
+      return {
+        pincode: pin,
+        serviceable: false,
+        estimatedDispatchDays: dispatchDays,
+        minDeliveryDays: null,
+        maxDeliveryDays: null,
+        rateSource: 'NONE',
+        courierName: null,
+        shippingCharge: null,
+        freeShipping: false,
+        codAvailable: false,
+        message: 'This seller does not deliver to this pincode yet.',
+      };
+    }
+
+    // LIVE courier rate first (overrides charge + ETA); null → in-house window.
+    let rateSource = 'IN_HOUSE';
+    let courierName: string | null = null;
+    let shippingCharge = inhouse.shippingCharge;
+    let liveTransitDays: number | null = null;
+    if (this.courier) {
+      const live = await this.courier.resolveSellerRate({
+        sellerId: store.sellerId,
+        storeId: store.id,
+        deliveryPincode: pin,
+        billableWeightKg: inhouse.billableWeightKg,
+        declaredValue,
+        cod: false,
+      });
+      if (live) {
+        rateSource = 'LIVE';
+        courierName = live.courierName;
+        shippingCharge = live.rate;
+        liveTransitDays = live.estimatedDays;
+      }
+    }
+
+    const minTransit =
+      liveTransitDays != null ? liveTransitDays : IN_HOUSE_TRANSIT_MIN_DAYS;
+    const maxTransit =
+      liveTransitDays != null
+        ? liveTransitDays + LIVE_TRANSIT_VARIANCE_DAYS
+        : IN_HOUSE_TRANSIT_MAX_DAYS;
+    const minDeliveryDays = dispatchDays + minTransit;
+    const maxDeliveryDays = dispatchDays + maxTransit;
+
+    const sellerGrandTotal = Math.round((declaredValue + shippingCharge) * 100) / 100;
+
+    return {
+      pincode: pin,
+      serviceable: true,
+      estimatedDispatchDays: dispatchDays,
+      minDeliveryDays,
+      maxDeliveryDays,
+      rateSource,
+      courierName,
+      shippingCharge,
+      freeShipping: inhouse.freeApplied,
+      codAvailable: isCodEligible(config, sellerGrandTotal),
+      message: null,
     };
   }
 

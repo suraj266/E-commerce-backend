@@ -62,6 +62,10 @@ export const OUTBOX_EVENT = {
   // RETURN_OUTBOX_EVENT literals used at the enqueue sites.
   EMAIL_RETURN_REPLACEMENT_APPROVED: 'email.return_replacement_approved',
   EMAIL_RETURN_REPLACEMENT_SHIPPED: 'email.return_replacement_shipped',
+  // P4 (CP-EC grievance). Values match grievance.constants GRIEVANCE_OUTBOX_EVENT.
+  EMAIL_GRIEVANCE_FILED: 'email.grievance_filed',
+  EMAIL_GRIEVANCE_STATUS: 'email.grievance_status',
+  EMAIL_GRIEVANCE_REPLY: 'email.grievance_reply',
 } as const;
 
 /** DI token for the shared ioredis client (used by BullMQ + the health check). */
